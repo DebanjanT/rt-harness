@@ -35,6 +35,17 @@ export interface PendingApproval extends ApprovalRequest {
   resolved?: "approved" | "denied";
 }
 
+export interface UsageStats {
+  inputTokens: number;
+  outputTokens: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  requests: number;
+  tokensPerSec: number;
+  contextTokens: number;
+  contextWindow: number | null;
+}
+
 interface ChatState {
   entries: ChatEntry[];
   running: boolean;
@@ -56,6 +67,8 @@ interface ChatState {
   /** Capability probe result for the current provider+model (null = probing/unknown). */
   capabilities: ModelCapabilities | null;
   capabilitiesLoading: boolean;
+  /** Live token/request stats from the agent run (last usage event). */
+  usage: UsageStats | null;
   input: string;
   loaded: boolean;
 
@@ -114,6 +127,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   images: [],
   capabilities: null,
   capabilitiesLoading: false,
+  usage: null,
   input: "",
   loaded: false,
 
@@ -251,7 +265,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
   handleEvent: (event) => {
     switch (event.type) {
       case "agent.started":
-        set({ iteration: 0 });
+        set({ iteration: 0, usage: null });
+        break;
+      case "usage":
+        set({
+          usage: {
+            inputTokens: event.inputTokens,
+            outputTokens: event.outputTokens,
+            totalInputTokens: event.totalInputTokens,
+            totalOutputTokens: event.totalOutputTokens,
+            requests: event.requests,
+            tokensPerSec: event.tokensPerSec,
+            contextTokens: event.contextTokens,
+            contextWindow: event.contextWindow,
+          },
+        });
         break;
       case "agent.iteration":
         set((s) => {

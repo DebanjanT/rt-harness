@@ -52,6 +52,16 @@ export function looksLikeInstructionText(text: string): boolean {
   return patterns.some((re) => re.test(text));
 }
 
+/**
+ * Pure greeting/small-talk detection. Tiny local models love to "helpfully"
+ * read/edit files even for "hi" — a real hazard. When the user's message is
+ * ONLY a greeting/small-talk phrase, the harness runs the request WITHOUT
+ * tools (like ask mode) so the reply is purely conversational. Deliberately
+ * conservative: only exact short phrases, never sentences with extra content.
+ */
+const PURE_GREETING_RE =
+  /^\s*(?:hi+|hey+|hello+|yo+|sup|hiya|howdy|greetings|good\s*(?:morning|afternoon|evening)|thanks?|thank\s*you|ty|ok(?:ay)?|cool|nice|who\s+are\s+you|what\s+are\s+you|what\s+can\s+you\s+do|can\s+you\s+help(?:\s+me)?|are\s+you\s+there)[\s!.,?]*$/i;
+
 const TOOL_NUDGE = [
   "You replied with instructions telling ME how to do the task — that is wrong.",
   "You are an autonomous agent with REAL tools. Never describe commands for the user to run.",
@@ -86,9 +96,44 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
   // calling tools (e.g. "you can run: touch sample.txt").
   let nudged = false;
 
-  const mode: AgentMode = opts.mode ?? "agent";
+  // ---- usage tracking ----
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  let requests = 0;
+  let contextWindow: number | null = null;
+  // Best-effort context-window discovery from the provider's /models payload.
+  try {
+    const page = await client.models.list();
+    for await (const m of page) {
+      if (m.id === opts.model) {
+        const meta = m as unknown as Record<string, unknown>;
+        for (const key of ["context_window", "context_length", "max_context_tokens", "context_size"]) {
+          const v = meta[key];
+          if (typeof v === "number" && v > 0) contextWindow = v;
+          if (v && typeof v === "object") {
+            const inner = v as Record<string, unknown>;
+            if (typeof inner.input === "number") contextWindow = inner.input;
+            if (typeof inner.total === "number") contextWindow = inner.total;
+          }
+        }
+        break;
+      }
+    }
+  } catch {
+    /* provider may not expose model metadata — context % hidden in UI */
+  }
+
+  const requestedMode: AgentMode = opts.mode ?? "agent";
+  // Guardrail: casual greetings never touch tools (unless the user explicitly
+  // chose bypass, which implies full autonomy).
+  const isPureGreeting =
+    requestedMode === "agent" && !opts.attachments.length && PURE_GREETING_RE.test(opts.userText.trim());
+  const mode: AgentMode = isPureGreeting ? "ask" : requestedMode;
   const useTools = mode === "agent" || mode === "bypass";
   const effectiveAutoApprove = opts.autoApprove || mode === "bypass";
+  if (isPureGreeting) {
+    console.log("[agent] pure greeting detected — running conversationally without tools");
+  }
 
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
     { role: "system", content: await buildSystemPrompt(opts, mode) + buildAttachmentBlock(opts.attachments) },
@@ -201,16 +246,38 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
           });
           return;
         }
+        // mlx_lm.server: its generation thread can die (commonly GPU OOM on
+        // 8GB Macs after many agent-loop requests grow the prompt cache).
+        // Every subsequent request 404s with "generation thread died".
+        if (/generation thread died|generation thread/i.test(msg)) {
+          emit({
+            type: "agent.error",
+            error:
+              `The MLX model server's generation thread died (usually GPU out-of-memory ` +
+              `on 8GB Macs — the prompt cache grows with every agent-loop request). ` +
+              `Restart it with a bounded cache: npm run mlx ` +
+              `(adds --prompt-cache-size 2 --max-tokens 1024 --prefill-step-size 1024), ` +
+              `then try again. Alternatively switch provider/model.`,
+          });
+          return;
+        }
         throw err;
       }
 
       let content = "";
       const pendingCalls = new Map<number, PendingToolCall>();
+      let providerUsage: { prompt_tokens?: number; completion_tokens?: number } | null = null;
+      const streamStart = Date.now();
 
       for await (const chunk of stream) {
         if (opts.signal.aborted) {
           stream.controller.abort();
           throw new DOMException("Aborted by user", "AbortError");
+        }
+        // Some providers include usage on the final chunk even without stream_options.
+        const chunkUsage = (chunk as unknown as { usage?: { prompt_tokens?: number; completion_tokens?: number } }).usage;
+        if (chunkUsage && (chunkUsage.prompt_tokens || chunkUsage.completion_tokens)) {
+          providerUsage = chunkUsage;
         }
         const delta = chunk.choices?.[0]?.delta;
         if (!delta) continue;
@@ -229,6 +296,37 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
           }
         }
       }
+
+      // ---- Usage accounting for this request --------------------------------
+      requests++;
+      const elapsedSec = Math.max((Date.now() - streamStart) / 1000, 0.001);
+      // Estimate: ~4 chars per token is a good approximation for code/English.
+      const estimateTokens = (chars: number) => Math.ceil(chars / 4);
+      const promptChars = messages.reduce((n, m) => {
+        const c = m.content;
+        if (typeof c === "string") return n + c.length;
+        if (Array.isArray(c)) return n + c.reduce((k: number, part) => k + ((part as { text?: string }).text?.length ?? 0), 0);
+        return n;
+      }, 0);
+      const outputChars =
+        content.length +
+        [...pendingCalls.values()].reduce((n, c) => n + c.name.length + c.argsJson.length, 0);
+      const inputTokens = providerUsage?.prompt_tokens ?? estimateTokens(promptChars);
+      const outputTokens = providerUsage?.completion_tokens ?? estimateTokens(outputChars);
+      totalInputTokens += inputTokens;
+      totalOutputTokens += outputTokens;
+      const contextTokens = inputTokens;
+      emit({
+        type: "usage",
+        inputTokens,
+        outputTokens,
+        totalInputTokens,
+        totalOutputTokens,
+        requests,
+        tokensPerSec: Math.round(outputTokens / elapsedSec),
+        contextTokens,
+        contextWindow,
+      });
 
       // ---- Resolve which tool calls to run (native first, then text parser) --
       const nativeMode = pendingCalls.size > 0;
@@ -326,6 +424,19 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
       return;
     }
     console.error("[agent] run failed:", err);
-    emit({ type: "agent.error", error: (err as Error).message });
+    const errMsg = (err as Error).message ?? "";
+    if (/generation thread died|generation thread/i.test(errMsg)) {
+      emit({
+        type: "agent.error",
+        error:
+          `The MLX model server's generation thread died (usually GPU out-of-memory ` +
+          `on 8GB Macs — the prompt cache grows with every agent-loop request). ` +
+          `Restart it with a bounded cache: npm run mlx ` +
+          `(adds --prompt-cache-size 2 --max-tokens 1024 --prefill-step-size 1024), ` +
+          `then try again. Alternatively switch provider/model.`,
+      });
+      return;
+    }
+    emit({ type: "agent.error", error: errMsg });
   }
 }

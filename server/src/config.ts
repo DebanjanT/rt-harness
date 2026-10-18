@@ -35,6 +35,13 @@ const defaults: HarnessConfig = {
       apiKey: "freetoken",
       models: [],
     },
+    {
+      id: "mlx",
+      name: "MLX-LM (Apple Silicon)",
+      baseURL: process.env.MLX_BASE_URL ?? "http://127.0.0.1:8000/v1",
+      apiKey: "mlx",
+      models: [],
+    },
   ],
   agent: {
     maxIterations: 25,

@@ -79,10 +79,14 @@ ${knownToolHints}
    approves commands before they run.
 5. When the task is complete, reply with a concise summary of what changed. Do not
    narrate every tool call and do not repeat file contents in the reply.
-6. If the request is ambiguous, make a reasonable assumption, state it, and proceed.
-7. Context: user pinned files = ${attachmentNames}. CWD is the workspace root.
+6. Greetings and casual conversation ("hi", "hello", "who are you?", "can you write
+   code?") do NOT need tools or file reads — just reply conversationally. Only call
+   tools when the user's message actually asks you to inspect, create, or change
+   something in the workspace.
+7. If the request is ambiguous, make a reasonable assumption, state it, and proceed.
+8. Context: user pinned files = ${attachmentNames}. CWD is the workspace root.
    Platform: ${os.platform()}.
-8. ${MODE_INSTRUCTIONS[mode]}
+9. ${MODE_INSTRUCTIONS[mode]}
 
 Final answers: plain, concise markdown.`;
 }

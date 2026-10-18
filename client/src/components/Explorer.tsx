@@ -101,7 +101,7 @@ export function Explorer() {
   };
 
   return (
-    <Panel className="w-full">
+    <Panel className="w-full flex-1">
       <PanelHeader title="Explorer">
         <Tooltip content="Refresh">
           <Button variant="ghost" size="xs" onClick={() => void loadTree()}>

@@ -88,6 +88,11 @@ function parseLenientObject(text: string): unknown | undefined {
 
 /** Extract first JSON object from a string (tolerating trailing prose). */
 function extractJsonObject(text: string): unknown | undefined {
+  return extractJsonObjectWithEnd(text)?.obj;
+}
+
+/** Same as extractJsonObject but also reports the index AFTER the object's `}`. */
+function extractJsonObjectWithEnd(text: string): { obj: unknown; end: number } | undefined {
   const start = text.indexOf("{");
   if (start === -1) return undefined;
   let depth = 0;
@@ -107,7 +112,7 @@ function extractJsonObject(text: string): unknown | undefined {
       depth--;
       if (depth === 0) {
         try {
-          return JSON.parse(text.slice(start, i + 1));
+          return { obj: JSON.parse(text.slice(start, i + 1)), end: i + 1 };
         } catch {
           return undefined;
         }
@@ -251,27 +256,38 @@ export function parseTextToolCalls(content: string, knownTools: string[]): Parse
   let cleaned = content;
   const known = new Set(knownTools);
 
-  // --- 1. <tool.NAME>…</tool.NAME> and <tool NAME="…">…</tool> tags ----------
-  // Opening tag allows extra attributes (path="…" etc.); closing tag allows the
-  // dotted form (</tool.write_file>).
-  const tagRe = /<tool(?:\s+name="([^"]*)"|\s*\.\s*([A-Za-z_][\w.]*))?[^>]*>((?:.|\n)*?)<\/tool[^>]*>/gi;
+  // --- 1. <tool.NAME>…</tool.NAME>, <tool NAME="…">…</tool>, and the bare
+  // <tool_call>…</tool_call> form (Qwen/Bonsai chat templates) -----------------
+  // Opening tag allows extra attributes; closing tag allows the dotted form.
+  // For the bare <tool_call> form the tool name comes from the JSON body.
+  const tagRe = /<tool(?:_call|_calls|call)?(?:\s+name="([^"]*)"|\s*\.\s*([A-Za-z_][\w.]*))?[^>]*>((?:.|\n)*?)<\/tool[^>]*>/gi;
   cleaned = cleaned.replace(tagRe, (match, attrName, dotName, body) => {
     const rawName = (attrName ?? dotName ?? "") as string;
-    const tool = matchToolName(rawName, known);
-    if (!tool) return match; // keep unrecognized tags visible to the user
     const attrArgs = tagAttrArgs((match.match(/<tool[^>]*>/) ?? [""])[0]);
     const json = tryParseJson(body) ?? extractJsonObject(body);
+    let tool = rawName ? matchToolName(rawName, known) : null;
+
+    // Bare <tool_call>: the name lives inside the JSON body ("name" field).
+    if (!tool && !rawName && json && typeof json === "object") {
+      const norm = normalizeObject(json);
+      if (norm && known.has(norm.name)) tool = norm.name;
+    }
+    if (!tool) return match; // keep unrecognized tags visible to the user
+
     let args: Record<string, unknown>;
     if (json && typeof json === "object") {
       const norm = normalizeObject(json);
-      if (norm) {
+      if (norm && norm.name === tool && !rawName) {
+        // Bare form: the whole {name, arguments} object describes the call.
+        args = norm.args;
+      } else if (norm) {
         // Body was a full {name, arguments} / {tool, args} object.
         args = { ...attrArgs, ...norm.args };
       } else {
         // Body is a pure args object (no name field) — use it directly.
         args = { ...attrArgs };
         for (const [k, v] of Object.entries(json as Record<string, unknown>)) {
-          if (!["type", "function", "name", "tool", "tool_name"].includes(k)) args[k] = v;
+          if (!"type function name tool tool_name".split(" ").includes(k)) args[k] = v;
         }
       }
     } else {
@@ -280,6 +296,11 @@ export function parseTextToolCalls(content: string, knownTools: string[]): Parse
     calls.push({ name: tool, args });
     return ""; // strip recognized tool-call syntax from displayed text
   });
+
+  // --- 1b. stray fragments from degenerate outputs ----------------------------
+  // e.g. "</tool_call>I cannot proceed…" or a lone "<tool_call>" — never
+  // meaningful prose, always chat-template noise. Strip from display text.
+  cleaned = cleaned.replace(/<\/?(?:tool_call|toolcalls?|tool)>/gi, "");
 
   // --- 1c. UNCLOSED tool tags -------------------------------------------------
   // Models often emit `<tool.write_file> { … }` and forget the closing tag.
@@ -384,21 +405,34 @@ export function parseTextToolCalls(content: string, knownTools: string[]): Parse
   }
 
   // --- 3. bare JSON objects with a known tool name ----------------------------
+  // Uses the string-aware brace scanner (not a regex) so objects whose string
+  // values contain braces — e.g. C code in write_file content — parse correctly
+  // at any nesting depth.
   if (calls.length === 0) {
     const candidates: string[] = [];
-    const objRe = /\{(?:[^{}]|\{[^{}]*\})*\}/g;
-    let m: RegExpExecArray | null;
-    while ((m = objRe.exec(content)) !== null) {
-      const json = tryParseJson(m[0]);
-      if (!json) continue;
-      const norm = normalizeObject(json);
+    let i = 0;
+    while (i < content.length) {
+      if (content[i] !== "{") {
+        i++;
+        continue;
+      }
+      const found = extractJsonObjectWithEnd(content.slice(i));
+      if (!found) {
+        i++;
+        continue;
+      }
+      const raw = content.slice(i, i + found.end);
+      const norm = normalizeObject(found.obj);
       if (norm && known.has(norm.name)) {
         calls.push(norm);
-        candidates.push(m[0]);
+        candidates.push(raw);
       }
+      i += Math.max(found.end, 1);
     }
     if (calls.length > 0) {
-      cleaned = cleaned.replace(objRe, (s) => (candidates.includes(s) ? "" : s));
+      for (const raw of candidates) {
+        cleaned = cleaned.replace(raw, "");
+      }
     }
   }
 

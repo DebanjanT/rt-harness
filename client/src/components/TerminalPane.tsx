@@ -100,7 +100,7 @@ export function TerminalPane() {
   return (
     <Panel className="w-full bg-surface-0">
       <PanelHeader title="Terminal" />
-      <div className="min-h-0 flex-1 px-2 pb-1.5">
+      <div className="min-h-0 flex-1 px-2 py-1.5">
         <div ref={containerRef} className="h-full" />
       </div>
     </Panel>

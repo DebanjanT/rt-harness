@@ -29,6 +29,17 @@ export type AgentEvent =
   | { type: "file.changed"; path: string }
   | { type: "agent.started"; providerId: string; model: string }
   | { type: "agent.iteration"; iteration: number }
+  | {
+      type: "usage";
+      inputTokens: number;
+      outputTokens: number;
+      totalInputTokens: number;
+      totalOutputTokens: number;
+      requests: number;
+      tokensPerSec: number;
+      contextTokens: number;
+      contextWindow: number | null;
+    }
   | { type: "agent.finished" }
   | { type: "agent.error"; error: string }
   /** Server → client terminal stream (handled by TerminalPane directly). */

@@ -274,10 +274,31 @@ export function Composer() {
     }
   };
 
+  const [emptySendNotice, setEmptySendNotice] = useState<string | null>(null);
+
   const submit = async () => {
     if (chat.running) return;
-    const hasContext = chat.pinnedPaths.length > 0;
-    if (!chat.input.trim() && chat.images.length === 0 && !hasContext) return;
+    const hasText = chat.input.trim().length > 0;
+    const hasContext = chat.pinnedPaths.length > 0 || chat.images.length > 0;
+
+    // Guard: nothing to send — explain instead of silently no-op or firing an
+    // empty request at the model.
+    if (!hasText && !hasContext) {
+      setEmptySendNotice(
+        "Nothing to send — type a message, or attach context first (@ file or + image). " +
+          "A request with no text and no context is not sent to the model.",
+      );
+      window.setTimeout(() => setEmptySendNotice(null), 5000);
+      return;
+    }
+    // Context-only is fine, but let the user know how the model will treat it.
+    if (!hasText && hasContext) {
+      setEmptySendNotice(
+        "Sent context only — the model will describe/summarize the attached content.",
+      );
+      window.setTimeout(() => setEmptySendNotice(null), 4000);
+    }
+
     if (chat.images.length > 0 && chat.capabilities && !chat.capabilities.vision) {
       useChatStore.setState((s) => ({
         entries: [...s.entries, {
@@ -343,6 +364,18 @@ export function Composer() {
         <div className="mb-2 rounded-md border border-red-900/60 bg-red-950/20 px-2.5 py-1.5
           text-[11px] text-red-400">
           This model can't process images. Remove the attachment or pick a vision-capable model.
+        </div>
+      )}
+
+      {/* empty-send / context-only notice */}
+      {emptySendNotice && (
+        <div className="mb-2 flex items-start gap-1.5 rounded-md border border-amber-900/60
+          bg-amber-950/20 px-2.5 py-1.5 text-[11px] leading-relaxed text-amber-400">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="mt-px shrink-0">
+            <path d="M8 1.5L15 13.5H1L8 1.5z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+            <path d="M8 6v3.5 M8 11.5v.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+          </svg>
+          {emptySendNotice}
         </div>
       )}
 

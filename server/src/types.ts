@@ -29,6 +29,23 @@ export type AgentEvent =
   | { type: "file.changed"; path: string }
   | { type: "agent.started"; providerId: string; model: string }
   | { type: "agent.iteration"; iteration: number }
+  | {
+      type: "usage";
+      /** Tokens reported by the provider (stream_options.usage), when available. */
+      inputTokens: number;
+      outputTokens: number;
+      /** Cumulative for the whole agent run. */
+      totalInputTokens: number;
+      totalOutputTokens: number;
+      /** Requests made in this run. */
+      requests: number;
+      /** Observed output tokens/sec over the last request. */
+      tokensPerSec: number;
+      /** Estimated tokens of the outgoing context (prompt) for this request. */
+      contextTokens: number;
+      /** Model's context window when the provider reports one (else null). */
+      contextWindow: number | null;
+    }
   | { type: "agent.finished" }
   | { type: "agent.error"; error: string };
 

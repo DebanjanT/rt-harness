@@ -13,6 +13,60 @@ function ModeBadge({ mode }: { mode?: AgentMode }) {
   return <Badge tone={tone}>{m?.label ?? mode}</Badge>;
 }
 
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
+/** Live request/token stats from the running agent (server-reported usage). */
+function StatsBar() {
+  const usage = useChatStore((s) => s.usage);
+  if (!usage) return null;
+
+  const ctxPct =
+    usage.contextWindow && usage.contextWindow > 0
+      ? Math.min(100, Math.round((usage.contextTokens / usage.contextWindow) * 100))
+      : null;
+
+  return (
+    <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-line
+      bg-surface-2/60 px-3 py-1 text-[10px] text-ink-3">
+      <span title="Model requests in this run">
+        req <span className="font-mono text-ink-2">{usage.requests}</span>
+      </span>
+      <span title="Output tokens per second (last request)">
+        <span className="font-mono text-ink-2">{usage.tokensPerSec}</span> tok/s
+      </span>
+      <span title="Input tokens (last / total)">
+        in <span className="font-mono text-ink-2">{fmtTokens(usage.inputTokens)}</span>
+        <span className="text-ink-3"> / {fmtTokens(usage.totalInputTokens)}</span>
+      </span>
+      <span title="Output tokens (last / total)">
+        out <span className="font-mono text-ink-2">{fmtTokens(usage.outputTokens)}</span>
+        <span className="text-ink-3"> / {fmtTokens(usage.totalOutputTokens)}</span>
+      </span>
+      {ctxPct !== null ? (
+        <span className="flex items-center gap-1.5" title={`Context: ${fmtTokens(usage.contextTokens)} of ${fmtTokens(usage.contextWindow!)} tokens`}>
+          ctx
+          <span className="relative h-1.5 w-16 overflow-hidden rounded-full bg-zinc-800">
+            <span
+              className={`absolute inset-y-0 left-0 rounded-full transition-all
+                ${ctxPct > 85 ? "bg-red-500" : ctxPct > 60 ? "bg-amber-500" : "bg-zinc-400"}`}
+              style={{ width: `${ctxPct}%` }}
+            />
+          </span>
+          <span className="font-mono text-ink-2">{ctxPct}%</span>
+        </span>
+      ) : (
+        <span title="Context window size is not reported by this provider">
+          ctx <span className="font-mono text-ink-2">{fmtTokens(usage.contextTokens)}</span>
+        </span>
+      )}
+    </div>
+  );
+}
+
 function ChatMessage({ entry }: { entry: import("../stores/chat").ChatEntry }) {
   if (entry.role === "user") {
     return (
@@ -82,16 +136,17 @@ export function ChatPanel() {
   };
 
   return (
-    <Panel className="w-full">
+    <Panel className="w-full flex-1">
       <PanelHeader title="Agent">
         <span className="text-[10px] text-ink-3">
           {chat.running ? `step ${chat.iteration}` : ""}
         </span>
       </PanelHeader>
 
-      <div className="pt-2" />
+      <StatsBar />
 
-      {/* plain scroll container so programmatic stick-to-bottom is reliable */}
+      {/* plain scroll container so programmatic stick-to-bottom is reliable.
+          Flex-1 min-h-0 keeps the Composer pinned to the bottom edge. */}
       <div
         ref={scrollRef}
         onScroll={handleScroll}
@@ -131,7 +186,10 @@ export function ChatPanel() {
         )}
       </div>
 
-      <Composer />
+      {/* Composer is the last flex child — always pinned to the bottom. */}
+      <div className="shrink-0">
+        <Composer />
+      </div>
     </Panel>
   );
 }
