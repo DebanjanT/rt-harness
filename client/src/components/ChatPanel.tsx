@@ -68,7 +68,7 @@ function StatsBar() {
   );
 }
 
-function AssistantSegments({ segments }: { segments: Segment[] }) {
+function AssistantSegments({ segments, streaming }: { segments: Segment[]; streaming?: boolean }) {
   // Defensive: never crash on undefined/persisted-shape entries.
   const list = Array.isArray(segments) ? segments : [];
   return (
@@ -82,7 +82,11 @@ function AssistantSegments({ segments }: { segments: Segment[] }) {
           return seg.approval ? <ApprovalCard key={seg.approval.id || i} approval={seg.approval} /> : null;
         }
         if (seg.kind === "thinking") {
-          return <ThinkingBlock key={i} text={seg.text} />;
+          // "Live" = the agent is still streaming AND this is the newest segment
+          // (once message text arrives, a text segment follows and the thinking
+          // is complete → collapsed).
+          const live = Boolean(streaming) && i === list.length - 1;
+          return <ThinkingBlock key={i} text={seg.text} live={live} />;
         }
         return (
           <div key={i} className="min-w-0 max-w-full overflow-hidden rounded-lg rounded-bl-sm
@@ -95,26 +99,48 @@ function AssistantSegments({ segments }: { segments: Segment[] }) {
   );
 }
 
-/** Light-gray reasoning block shown before the final output. */
-function ThinkingBlock({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
+/**
+ * Light-gray reasoning block.
+ *
+ * While the model is still thinking (live), the body stays open and
+ * auto-scrolls so the LATEST reasoning is always visible. When thinking
+ * completes (message text starts arriving / turn ends) the block collapses to
+ * just the header — click to expand the full reasoning at any time.
+ */
+function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // null = user hasn't touched it → follow the default (open while live)
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const expanded = userOpen ?? live;
+
+  // Keep the live view pinned to the newest reasoning lines.
+  useEffect(() => {
+    if (live && expanded && bodyRef.current) {
+      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+    }
+  }, [text, expanded, live]);
+
   return (
-    <div className="min-w-0 max-w-full overflow-hidden rounded-lg rounded-bl-sm border border-line/70
-      bg-surface-2/50 px-3 py-2">
+    <div className={`min-w-0 max-w-full overflow-hidden rounded-lg rounded-bl-sm border
+      px-3 py-2 transition-colors
+      ${live ? "border-line bg-surface-2/70" : "border-line/70 bg-surface-2/50"}`}>
       <button
         className="flex w-full items-center gap-1.5 text-left text-[10px] font-semibold
           uppercase tracking-wider text-ink-3 transition-colors hover:text-ink-2"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => setUserOpen(!expanded)}
       >
-        💭 Thinking
-        <span className={`text-[9px] transition-transform ${open ? "rotate-90" : ""}`}>▶</span>
+        {live ? "💭 Thinking…" : "💭 Thinking"}
+        <span className={`text-[9px] transition-transform ${expanded ? "rotate-90" : ""}`}>▶</span>
       </button>
-      <div
-        className={`mt-1 whitespace-pre-wrap break-words text-[12px] italic leading-relaxed text-ink-3
-          ${open ? "" : "line-clamp-4"}`}
-      >
-        {text}
-      </div>
+      {expanded && (
+        <div
+          ref={bodyRef}
+          className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words text-[12px]
+            italic leading-relaxed text-ink-3"
+        >
+          {text}
+        </div>
+      )}
     </div>
   );
 }
@@ -164,7 +190,7 @@ function ChatMessage({ entry }: { entry: import("../stores/chat").ChatEntry }) {
   }
   return (
     <div className="mr-2 flex min-w-0 flex-col gap-1.5">
-      <AssistantSegments segments={entry.segments} />
+      <AssistantSegments segments={entry.segments} streaming={entry.streaming} />
       {entry.streaming && <span className="stream-cursor text-accent">▊</span>}
       {entry.error && (
         <div className="min-w-0 rounded-lg border border-red-900/60 bg-red-950/20 px-3 py-2 text-xs
