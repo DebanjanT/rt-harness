@@ -102,6 +102,9 @@ export interface HarnessConfig {
     maxIterations: number;
     maxFileReadChars: number;
     maxSearchResults: number;
+    /** Per-request output budget — thinking models burn hundreds of tokens
+     *  on reasoning before any visible output. */
+    maxOutputTokens: number;
   };
   /** Recently opened workspace roots (most recent first) — for the picker modal. */
   recentWorkspaces?: string[];

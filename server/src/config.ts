@@ -47,6 +47,7 @@ const defaults: HarnessConfig = {
     maxIterations: 25,
     maxFileReadChars: 60000,
     maxSearchResults: 50,
+    maxOutputTokens: 4096,
   },
 };
 

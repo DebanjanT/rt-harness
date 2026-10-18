@@ -159,6 +159,8 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
   let nativeToolsUnsupported = false;
   // Set once a 4xx shows the server rejects the reasoning_effort param.
   let thinkingUnsupported = false;
+  // Set once a 4xx shows the server rejects stream_options (usage in streams).
+  let streamUsageUnsupported = false;
   // One-time corrective re-prompt when the model gives instructions instead of
   // calling tools (e.g. "you can run: touch sample.txt").
   let nudged = false;
@@ -296,13 +298,19 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
         const createParams = {
           model: opts.model,
           messages,
+          // Thinking models burn hundreds of tokens on reasoning BEFORE any
+          // visible output — the mlx_lm.server default (512) dies mid-think
+          // with finish_reason=length. Give a generous budget.
+          max_tokens: cfg.agent.maxOutputTokens,
           // Some servers/models reject the tools param entirely — retry without.
           ...(useTools && !nativeToolsUnsupported ? { tools: openaiTools } : {}),
           // Reasoning effort for thinking-capable models; other servers reject
           // the unknown param — degrade once (see catch) and continue without.
           ...(effort ? { reasoning_effort: effort } : {}),
+          // Request real token counts in the stream (mlx/OpenAI support this;
+          // servers that reject it degrade once via the catch below).
+          ...(streamUsageUnsupported ? {} : { stream_options: { include_usage: true } }),
           stream: true,
-          // NOTE: no stream_options — many local OpenAI-compatible servers reject it.
         } as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
         stream = await client.chat.completions.create(createParams);
       } catch (err) {
@@ -317,6 +325,12 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
         if (effort && status === 400 && /reasoning|effort|thinking/i.test(msg)) {
           console.warn("[agent] server rejected reasoning_effort — continuing without thinking mode");
           thinkingUnsupported = true;
+          iteration--;
+          continue;
+        }
+        if (!streamUsageUnsupported && status === 400 && /stream_options|include_usage/i.test(msg)) {
+          console.warn("[agent] server rejected stream_options — falling back to estimated usage");
+          streamUsageUnsupported = true;
           iteration--;
           continue;
         }
