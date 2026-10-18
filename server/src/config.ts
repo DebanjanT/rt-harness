@@ -1,150 +1,235 @@
-import fs from "node:fs";
+import fsSync from "node:fs";
 import path from "node:path";
 import url from "node:url";
+import { createRequire } from "node:module";
 import type { HarnessConfig } from "./types.js";
+
+const require = createRequire(import.meta.url);
+// better-sqlite3 is a native CJS module — the server is ESM.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const Database = require("better-sqlite3");
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
 /**
- * Config resolution order:
- *   1. harness.local.json (gitignored — your personal overrides)
- *   2. harness.config.json (committed defaults)
- *   3. built-in defaults
+ * SQLite-backed config store.
+ *
+ * Replaces the dual harness.config.json / server/harness.local.json files:
+ * one DB at server/data/harness.db holds the SAME keys, so nothing else in
+ * the codebase changes. On first run it MIGRATES values from the legacy JSON
+ * files (local overrides win, then committed defaults). The DB is the single
+ * source of truth afterwards; JSON files are left untouched as backup.
  */
-const candidates = [
-  path.resolve(process.cwd(), "harness.local.json"),
-  path.resolve(process.cwd(), "harness.config.json"),
-  path.resolve(__dirname, "../../harness.local.json"),
-  path.resolve(__dirname, "../../harness.config.json"),
-];
 
-const defaults: HarnessConfig = {
-  workspaceRoot: process.env.HARNESS_WORKSPACE ?? process.cwd(),
-  providers: [
-    {
-      id: "ollama",
-      name: "Ollama (local)",
-      baseURL: process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434/v1",
-      apiKey: "ollama",
-      models: [],
-    },
-    {
-      id: "freetoken",
-      name: "FreeToken (local)",
-      baseURL: process.env.FREETOKEN_BASE_URL ?? "http://127.0.0.1:1919/v1",
-      apiKey: "freetoken",
-      models: [],
-    },
-    {
-      id: "mlx",
-      name: "MLX-LM (Apple Silicon)",
-      baseURL: process.env.MLX_BASE_URL ?? "http://127.0.0.1:8000/v1",
-      apiKey: "mlx",
-      models: [],
-    },
-  ],
-  agent: {
-    maxIterations: 25,
-    maxFileReadChars: 60000,
-    maxSearchResults: 50,
-    maxOutputTokens: 4096,
-  },
-};
+const DB_PATH = path.resolve(__dirname, "../../data/harness.db");
 
-let cfg: HarnessConfig = defaults;
+interface StoredConfig extends HarnessConfig {
+  recentWorkspaces?: string[];
+}
 
-for (const file of candidates) {
-  try {
-    if (fs.existsSync(file)) {
-      const loaded = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<HarnessConfig>;
+export type ProviderEntry = HarnessConfig["providers"][number];
+
+/** Factory-reset values for the agent settings dialog. */
+export const AGENT_DEFAULTS = {
+  maxIterations: 25,
+  maxFileReadChars: 60000,
+  maxSearchResults: 50,
+  maxOutputTokens: 4096,
+} as const;
+
+let cfg: StoredConfig & HarnessConfig = defaultConfig();
+
+function defaultConfig(): StoredConfig & HarnessConfig {
+  return {
+    workspaceRoot: process.env.HARNESS_WORKSPACE ?? process.cwd(),
+    providers: [
+      {
+        id: "ollama",
+        name: "Ollama (local)",
+        baseURL: process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434/v1",
+        apiKey: "ollama",
+        models: [],
+      },
+      {
+        id: "freetoken",
+        name: "FreeToken (local)",
+        baseURL: process.env.FREETOKEN_BASE_URL ?? "http://127.0.0.1:1919/v1",
+        apiKey: "freetoken",
+        models: [],
+      },
+      {
+        id: "mlx",
+        name: "MLX-LM (Apple Silicon)",
+        baseURL: process.env.MLX_BASE_URL ?? "http://127.0.0.1:8080/v1",
+        apiKey: "mlx",
+        models: [],
+      },
+    ],
+    agent: {
+      maxIterations: 25,
+      maxFileReadChars: 60000,
+      maxSearchResults: 50,
+      maxOutputTokens: 4096,
+    },
+    recentWorkspaces: [],
+  };
+}
+
+function migrateFromJson(db: import("better-sqlite3").Database): void {
+  // Look for legacy JSON config, nearest-cwd-first like the old loader.
+  const candidates = [
+    path.resolve(process.cwd(), "harness.local.json"),
+    path.resolve(process.cwd(), "harness.config.json"),
+    path.resolve(__dirname, "../../harness.local.json"),
+    path.resolve(__dirname, "../../harness.config.json"),
+    path.resolve(__dirname, "../../server/harness.local.json"),
+  ];
+  for (const file of candidates) {
+    try {
+      if (!fsSync.existsSync(file)) continue;
+      const loaded = JSON.parse(fsSync.readFileSync(file, "utf8")) as Partial<
+        StoredConfig & HarnessConfig
+      >;
+      const defaults = defaultConfig();
       cfg = {
         ...defaults,
         ...loaded,
         agent: { ...defaults.agent, ...(loaded.agent ?? {}) },
         providers: loaded.providers?.length ? loaded.providers : defaults.providers,
+        recentWorkspaces: loaded.recentWorkspaces ?? [],
       };
-      console.log(`[config] loaded ${path.basename(file)}`);
-      break;
+      console.log(`[config] migrated settings from ${file} into SQLite`);
+      return;
+    } catch {
+      /* try next candidate */
     }
+  }
+  cfg = defaultConfig();
+  console.log("[config] no legacy JSON found — starting with defaults");
+}
+
+function initDb(): import("better-sqlite3").Database {
+  fsSync.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+  const db: import("better-sqlite3").Database = new Database(DB_PATH);
+  db.pragma("journal_mode = WAL");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS kv (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
+  return db;
+}
+
+function loadFromDb(db: import("better-sqlite3").Database): (StoredConfig & HarnessConfig) | null {
+  const row = db.prepare("SELECT value FROM kv WHERE key = 'config'").get() as
+    | { value: string }
+    | undefined;
+  if (!row) return null;
+  try {
+    const parsed = JSON.parse(row.value) as StoredConfig & HarnessConfig;
+    const defaults = defaultConfig();
+    return {
+      ...defaults,
+      ...parsed,
+      agent: { ...defaults.agent, ...(parsed.agent ?? {}) },
+      providers: parsed.providers?.length ? parsed.providers : defaults.providers,
+      recentWorkspaces: parsed.recentWorkspaces ?? [],
+    };
   } catch (err) {
-    console.warn(`[config] failed to load ${file}:`, err);
+    console.warn("[config] DB config corrupt — re-migrating:", err);
+    return null;
   }
 }
 
-// Resolve workspaceRoot to an absolute path relative to the config file's dir.
-if (!path.isAbsolute(cfg.workspaceRoot)) {
-  const base = candidates.find((f) => fs.existsSync(f)) ?? process.cwd();
-  cfg.workspaceRoot = path.resolve(path.dirname(base), cfg.workspaceRoot);
+function saveToDb(db: import("better-sqlite3").Database, config: StoredConfig): void {
+  db.prepare(
+    "INSERT INTO kv (key, value) VALUES ('config', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+  ).run(JSON.stringify(config, null, 2));
 }
 
-export function getConfig(): HarnessConfig {
+// ---- init -----------------------------------------------------------------
+const db = initDb();
+{
+  const loaded = loadFromDb(db);
+  if (loaded) {
+    cfg = loaded;
+  } else {
+    migrateFromJson(db);
+    saveToDb(db, cfg); // persist the migrated values immediately
+  }
+}
+
+// Resolve workspaceRoot relative to the DB location if it isn't absolute.
+if (!path.isAbsolute(cfg.workspaceRoot)) {
+  cfg.workspaceRoot = path.resolve(__dirname, "../../", cfg.workspaceRoot);
+}
+
+// ---- public API (same shape as the old config.ts) --------------------------
+
+export function getConfig(): StoredConfig & HarnessConfig {
   return cfg;
 }
 
 export function getProvider(id: string) {
-  return cfg.providers.find((p) => p.id === id);
+  return cfg.providers.find((p: ProviderEntry) => p.id === id);
 }
 
-/**
- * Persist the CURRENT config to harness.local.json (gitignored). Used when the
- * user adds/removes a custom provider at runtime so it survives restarts.
- */
-function persistLocal(): void {
-  const localPath = path.resolve(process.cwd(), "harness.local.json");
-  let existing: Record<string, unknown> = {};
-  try {
-    existing = JSON.parse(fs.readFileSync(localPath, "utf8")) as Record<string, unknown>;
-  } catch {
-    /* start fresh */
-  }
-  existing.providers = cfg.providers;
-  existing.workspaceRoot = cfg.workspaceRoot;
-  existing.agent = cfg.agent;
-  existing.recentWorkspaces = cfg.recentWorkspaces ?? [];
-  try {
-    fs.writeFileSync(localPath, JSON.stringify(existing, null, 2));
-  } catch (err) {
-    console.warn("[config] could not persist harness.local.json:", err);
-  }
+function persist(): void {
+  saveToDb(db, cfg);
 }
 
-/** Add a runtime (custom/cloud) provider. Returns false if id collides. */
-export function addProvider(p: HarnessConfig["providers"][number]): boolean {
-  if (cfg.providers.some((x) => x.id === p.id)) return false;
+export function addProvider(p: ProviderEntry): boolean {
+  if (cfg.providers.some((x: ProviderEntry) => x.id === p.id)) return false;
   cfg.providers.push(p);
-  persistLocal();
+  persist();
   return true;
 }
 
-/** Remove a provider by id. */
 export function removeProvider(id: string): boolean {
   const before = cfg.providers.length;
-  cfg.providers = cfg.providers.filter((p) => p.id !== id);
+  cfg.providers = cfg.providers.filter((p: ProviderEntry) => p.id !== id);
   if (cfg.providers.length !== before) {
-    persistLocal();
+    persist();
     return true;
   }
   return false;
 }
 
-/** Remember a workspace root in the recents list (most recent first, deduped). */
 export function touchRecentWorkspace(absPath: string): void {
-  const list = (cfg.recentWorkspaces ?? []).filter((p) => p !== absPath);
+  const list = (cfg.recentWorkspaces ?? []).filter((p: string) => p !== absPath);
   list.unshift(absPath);
   cfg.recentWorkspaces = list.slice(0, 8);
-  persistLocal();
+  persist();
 }
 
-/**
- * Switch the active workspace root. Validates the directory exists and
- * records it in recents. Returns the resolved absolute path.
- */
 export function setWorkspaceRoot(absPath: string): string {
   const resolved = path.resolve(absPath);
-  const stat = fs.statSync(resolved); // throws if missing
+  const stat = fsSync.statSync(resolved); // throws if missing
   if (!stat.isDirectory()) throw new Error(`Not a directory: ${resolved}`);
   cfg.workspaceRoot = resolved;
   touchRecentWorkspace(resolved);
   console.log(`[config] workspace switched to ${resolved}`);
   return resolved;
+}
+
+/** Update agent settings from the UI (validated numeric patch). */
+export function updateAgentSettings(
+  patch: Partial<HarnessConfig["agent"]>,
+): HarnessConfig["agent"] {
+  const clamp = (v: unknown, min: number, max: number, fallback: number) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(Math.max(Math.round(n), min), max) : fallback;
+  };
+  if (patch.maxIterations !== undefined)
+    cfg.agent.maxIterations = clamp(patch.maxIterations, 1, 100, AGENT_DEFAULTS.maxIterations);
+  if (patch.maxFileReadChars !== undefined)
+    cfg.agent.maxFileReadChars = clamp(patch.maxFileReadChars, 1000, 500_000, AGENT_DEFAULTS.maxFileReadChars);
+  if (patch.maxSearchResults !== undefined)
+    cfg.agent.maxSearchResults = clamp(patch.maxSearchResults, 1, 200, AGENT_DEFAULTS.maxSearchResults);
+  if (patch.maxOutputTokens !== undefined)
+    cfg.agent.maxOutputTokens = clamp(patch.maxOutputTokens, 256, 65_536, AGENT_DEFAULTS.maxOutputTokens);
+  persist();
+  console.log("[config] agent settings updated:", cfg.agent);
+  return { ...cfg.agent };
 }

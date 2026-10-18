@@ -91,4 +91,17 @@ export const api = {
     fetch(`/api/workspace/list?dir=${encodeURIComponent(dir)}`).then((r) =>
       json<{ dir: string; parent: string; entries: { name: string; path: string }[]; current: string }>(r),
     ),
+
+  /** Agent settings (SQLite-backed) + factory defaults. */
+  getSettings: () =>
+    fetch("/api/settings").then((r) =>
+      json<{ agent: Record<string, number>; defaults: Record<string, number> }>(r),
+    ),
+
+  updateSettings: (agent: Record<string, number>) =>
+    fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent }),
+    }).then((r) => json<{ ok: boolean; agent: Record<string, number>; defaults: Record<string, number> }>(r)),
 };

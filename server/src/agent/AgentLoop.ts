@@ -161,6 +161,8 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
   let thinkingUnsupported = false;
   // Set once a 4xx shows the server rejects stream_options (usage in streams).
   let streamUsageUnsupported = false;
+  // Set once a 4xx shows the server rejects chat_template_kwargs.
+  let templateKwargsUnsupported = false;
   // One-time corrective re-prompt when the model gives instructions instead of
   // calling tools (e.g. "you can run: touch sample.txt").
   let nudged = false;
@@ -307,6 +309,12 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
           // Reasoning effort for thinking-capable models; other servers reject
           // the unknown param — degrade once (see catch) and continue without.
           ...(effort ? { reasoning_effort: effort } : {}),
+          // Qwen3-style chat-template switch: models with enable_thinking in
+          // their template toggle reasoning on/off here. Sent ALWAYS (on when
+          // effort != off, off otherwise) so "off" truly disables thinking.
+          ...(!templateKwargsUnsupported
+            ? { chat_template_kwargs: { enable_thinking: effort !== null } }
+            : {}),
           // Request real token counts in the stream (mlx/OpenAI support this;
           // servers that reject it degrade once via the catch below).
           ...(streamUsageUnsupported ? {} : { stream_options: { include_usage: true } }),
@@ -331,6 +339,12 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
         if (!streamUsageUnsupported && status === 400 && /stream_options|include_usage/i.test(msg)) {
           console.warn("[agent] server rejected stream_options — falling back to estimated usage");
           streamUsageUnsupported = true;
+          iteration--;
+          continue;
+        }
+        if (!templateKwargsUnsupported && status === 400 && /chat_template|template_kwargs|enable_thinking/i.test(msg)) {
+          console.warn("[agent] server rejected chat_template_kwargs — continuing without template switch");
+          templateKwargsUnsupported = true;
           iteration--;
           continue;
         }
@@ -424,6 +438,13 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
         content += flushed.content;
         emit({ type: "message.delta", text: flushed.content });
       }
+
+      // Debug aid: confirms thinking/content mapping is wired correctly.
+      // Watch the harness server log — reasoning chars > 0 means the model's
+      // reasoning field is being captured.
+      console.log(
+        `[agent] req#${requests + 1} effort=${effort ?? "off"} reasoning=${thinking.length}c content=${content.length}c`,
+      );
 
       // ---- Usage accounting for this request --------------------------------
       requests++;

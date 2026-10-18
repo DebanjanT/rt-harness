@@ -3,6 +3,7 @@ import { useChatStore } from "../stores/chat";
 import type { Segment } from "../stores/chat";
 import { ToolCallCard } from "./ToolCallCard";
 import { ApprovalCard } from "./ApprovalCard";
+import { PlanApprovalCard } from "./PlanApprovalCard";
 import { Composer } from "./Composer";
 import { Markdown } from "./Markdown";
 import { Panel, PanelHeader, Badge } from "./ui/primitives";
@@ -145,7 +146,7 @@ function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
   );
 }
 
-function ChatMessage({ entry }: { entry: import("../stores/chat").ChatEntry }) {
+function ChatMessage({ entry, entryIndex }: { entry: import("../stores/chat").ChatEntry; entryIndex: number }) {
   if (entry.role === "user") {
     // Thumbnail strip: images (visual thumb) + pinned @-files (chip thumb).
     const thumbs: { kind: "image" | "file"; name: string; dataUrl?: string }[] = [
@@ -191,6 +192,10 @@ function ChatMessage({ entry }: { entry: import("../stores/chat").ChatEntry }) {
   return (
     <div className="mr-2 flex min-w-0 flex-col gap-1.5">
       <AssistantSegments segments={entry.segments} streaming={entry.streaming} />
+      {/* Plan mode: approval card with parsed steps after the model's plan */}
+      {entry.role === "assistant" && entry.mode === "plan" && !entry.error && (
+        <PlanApprovalCard entryIndex={entryIndex} />
+      )}
       {entry.streaming && <span className="stream-cursor text-accent">▊</span>}
       {entry.error && (
         <div className="min-w-0 rounded-lg border border-red-900/60 bg-red-950/20 px-3 py-2 text-xs
@@ -251,7 +256,7 @@ export function ChatPanel() {
             </div>
           )}
           <div className="flex flex-col gap-2.5">
-            {chat.entries.map((entry, i) => <ChatMessage key={i} entry={entry} />)}
+            {chat.entries.map((entry, i) => <ChatMessage key={i} entry={entry} entryIndex={i} />)}
           </div>
           {chat.running && chat.iteration > 0 && (
             <div className="py-2 text-center text-[11px] italic text-ink-3">

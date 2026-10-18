@@ -85,6 +85,8 @@ interface ChatState {
   capabilitiesLoading: boolean;
   /** Live token/request stats from the agent run (last usage event). */
   usage: UsageStats | null;
+  /** Entry indexes whose plan was already approved & handed to the agent. */
+  approvedPlanIds: string[];
   input: string;
   loaded: boolean;
 
@@ -102,6 +104,7 @@ interface ChatState {
   addProvider: (name: string, baseURL: string, apiKey: string) => Promise<void>;
   removeProvider: (id: string) => Promise<void>;
   send: (text: string) => Promise<void>;
+  markPlanApproved: (id: string) => void;
   cancel: () => void;
   resolveApproval: (id: string, approved: boolean) => void;
   handleEvent: (event: AgentEvent) => void;
@@ -181,6 +184,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   capabilities: null,
   capabilitiesLoading: false,
   usage: null,
+  approvedPlanIds: [],
   input: "",
   loaded: false,
 
@@ -315,7 +319,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   cancel: () => harnessSocket.send({ type: "chat.cancel" }),
-
+  markPlanApproved: (id: string) =>
+    set((s) => ({ approvedPlanIds: [...s.approvedPlanIds, id] })),
   resolveApproval: (id, approved) => {
     harnessSocket.send({ type: "chat.approve", id, approved });
     // Optimistic UI update; the server echoes approval.resolved too.

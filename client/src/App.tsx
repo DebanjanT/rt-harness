@@ -4,6 +4,7 @@ import { EditorPane } from "./components/EditorPane";
 import { ChatPanel } from "./components/ChatPanel";
 import { TerminalPane } from "./components/TerminalPane";
 import { WorkspacePicker } from "./components/WorkspacePicker";
+import { SettingsDialog } from "./components/SettingsDialog";
 import { api } from "./lib/api";
 import { harnessSocket } from "./lib/websocket";
 import { useChatStore } from "./stores/chat";
@@ -67,6 +68,7 @@ export default function App() {
   const init = useChatStore((s) => s.init);
   const loadTree = useWorkspaceStore((s) => s.loadTree);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [workspaceName, setWorkspaceName] = useState("");
 
   const explorer = useResizable(220, { min: 140, max: 420, direction: "left", localStorageKey: "rt.explorerW" });
@@ -119,7 +121,20 @@ export default function App() {
           {workspaceName || "workspace"}
         </button>
         <span className="text-[10px] text-ink-3">local AI coding harness</span>
+        <div className="flex-1" />
+        <button
+          onClick={() => setSettingsOpen(true)}
+          className="rounded-md p-1 text-ink-3 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+          title="Agent settings"
+        >
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+            <path d="M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4z" stroke="currentColor" strokeWidth="1.3" />
+            <path d="M13.2 8c0-.4.4-.8.4-1.2 0-.4-.5-.7-.5-1.1 0-.4-.3-.8-.6-1.1-.4-.1-.8-.2-1-.6-.3-.3-.5-.8-1-.8-.4 0-.8.4-1.2.4-.4 0-.8-.4-1.2-.4-.5 0-.7.5-1 .8-.2.4-.6.5-1 .6-.3.3-.6.7-.6 1.1 0 .4-.5.7-.5 1.1 0 .4.4.8.4 1.2 0 .4-.4.8-.4 1.2 0 .4.5.7.5 1.1 0 .4.3.8.6 1.1.4.1.8.2 1 .6.3.3.5.8 1 .8.4 0 .8-.4 1.2-.4.4 0 .8.4 1.2.4.5 0 .7-.5 1-.8.2-.4.6-.5 1-.6.3-.3.6-.7.6-1.1 0-.4.5-.7.5-1.1 0-.4-.4-.8-.4-1.2z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+          </svg>
+        </button>
       </header>
+
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
 
       <WorkspacePicker
         open={workspaceOpen}

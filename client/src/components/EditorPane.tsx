@@ -1,11 +1,45 @@
 import { useEffect } from "react";
-import Editor from "@monaco-editor/react";
+import Editor, { useMonaco } from "@monaco-editor/react";
 import { useEditorStore } from "../stores/editor";
 import { Button, Panel } from "./ui/primitives";
 
+/** True-black theme matching the harness surface palette (vs-dark is gray). */
+const RT_DARK = {
+  base: "vs-dark" as const,
+  inherit: true,
+  rules: [
+    { token: "comment", foreground: "63636b", fontStyle: "italic" },
+    { token: "string", foreground: "9ece6a" },
+    { token: "keyword", foreground: "bb9af7" },
+    { token: "number", foreground: "ff9e64" },
+    { token: "type", foreground: "2ac3de" },
+  ],
+  colors: {
+    "editor.background": "#09090b",
+    "editor.foreground": "#e4e4e7",
+    "editorGutter.background": "#09090b",
+    "editorLineNumber.foreground": "#3f3f46",
+    "editorLineNumber.activeForeground": "#a1a1aa",
+    "editor.lineHighlightBackground": "#16171a",
+    "editorCursor.foreground": "#d4d4d8",
+    "editor.selectionBackground": "#27272a",
+    "editorIndentGuide.background1": "#1e2024",
+    "editorWidget.background": "#16171a",
+    "scrollbarSlider.background": "#27292e80",
+  },
+};
+
 export function EditorPane() {
   const { tabs, activePath, setActive, closeTab, updateContent, saveTab, reloadIfOpen } = useEditorStore();
+  const monaco = useMonaco();
   const active = tabs.find((t) => t.path === activePath) ?? null;
+
+  // Register + apply the true-black theme once Monaco is loaded.
+  useEffect(() => {
+    if (!monaco) return;
+    monaco.editor.defineTheme("rt-dark", RT_DARK);
+    monaco.editor.setTheme("rt-dark");
+  }, [monaco]);
 
   // When the agent edits the currently open file, refresh it (unless user has edits).
   useEffect(() => {
@@ -51,7 +85,7 @@ export function EditorPane() {
           <div className="min-h-0 flex-1">
             <Editor
               height="100%"
-              theme="vs-dark"
+              theme="rt-dark"
               language={active.language}
               value={active.content}
               onChange={(v) => updateContent(active.path, v ?? "")}

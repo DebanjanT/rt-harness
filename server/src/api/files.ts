@@ -4,7 +4,7 @@ import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { getConfig, addProvider, removeProvider, setWorkspaceRoot } from "../config.js";
+import { getConfig, addProvider, removeProvider, setWorkspaceRoot, updateAgentSettings, AGENT_DEFAULTS } from "../config.js";
 import { getTree, resolveInWorkspace, pathExists } from "../workspace/FileSystem.js";
 import { isBinaryPath, looksBinary } from "../security/PathPolicy.js";
 import { listModels, createLLM } from "../llm/provider.js";
@@ -264,6 +264,30 @@ api.get("/capabilities", async (req, res) => {
     res.json(caps);
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Agent settings (SQLite-backed, editable from the UI)
+// ---------------------------------------------------------------------------
+
+/** GET /api/settings — current agent settings + factory defaults for reset buttons. */
+api.get("/settings", (_req, res) => {
+  const cfg = getConfig();
+  res.json({ agent: cfg.agent, defaults: AGENT_DEFAULTS });
+});
+
+/** POST /api/settings { agent: { maxIterations?, ... } } — validated partial update. */
+api.post("/settings", (req, res) => {
+  try {
+    const { agent } = req.body as { agent?: Record<string, unknown> };
+    if (!agent || typeof agent !== "object") {
+      return res.status(400).json({ error: "agent settings object required" });
+    }
+    const updated = updateAgentSettings(agent as never);
+    res.json({ ok: true, agent: updated, defaults: AGENT_DEFAULTS });
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
   }
 });
 
