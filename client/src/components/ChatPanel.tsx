@@ -1,97 +1,58 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../stores/chat";
-import { api } from "../lib/api";
 import { ToolCallCard } from "./ToolCallCard";
 import { ApprovalCard } from "./ApprovalCard";
-import {
-  Panel, PanelHeader, ScrollArea, Button, Dropdown, DropdownTrigger,
-  DropdownContent, DropdownItem, DropdownLabel, LabeledSwitch,
-} from "./ui/primitives";
+import { Composer } from "./Composer";import { Markdown } from "./Markdown";import { Panel, PanelHeader, Button, Badge } from "./ui/primitives";
+import type { AgentMode } from "../types/agent";
+import { MODES } from "../types/agent";
 
-function ChevronDown() {
-  return (
-    <svg width="10" height="10" viewBox="0 0 16 16" fill="none" className="shrink-0 opacity-60">
-      <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function ModelSelectors() {
-  const { providers, providerId, model, setProvider, setModel } = useChatStore();
-  const provider = providers.find((p) => p.id === providerId);
-
-  return (
-    <div className="flex gap-1.5 px-3 pb-2">
-      <Dropdown>
-        <DropdownTrigger asChild>
-          <button className="flex h-7 min-w-0 flex-1 items-center justify-between gap-1.5 rounded-md
-            border border-line bg-surface-0 px-2 text-[11px] text-ink-2 outline-none
-            transition-colors hover:border-zinc-600 hover:text-zinc-200">
-            <span className="truncate">{provider?.name ?? "Select provider"}</span>
-            <ChevronDown />
-          </button>
-        </DropdownTrigger>
-        <DropdownContent>
-          {providers.map((p) => (
-            <DropdownItem key={p.id} selected={p.id === providerId} onSelect={() => setProvider(p.id)}>
-              {p.name}
-              {p.id === providerId && <span className="text-[10px]">●</span>}
-            </DropdownItem>
-          ))}
-        </DropdownContent>
-      </Dropdown>
-
-      <Dropdown>
-        <DropdownTrigger asChild>
-          <button
-            disabled={!provider}
-            className="flex h-7 min-w-0 flex-1 items-center justify-between gap-1.5 rounded-md
-              border border-line bg-surface-0 px-2 font-mono text-[11px] text-ink-2 outline-none
-              transition-colors hover:border-zinc-600 hover:text-zinc-200
-              disabled:opacity-40"
-          >
-            <span className="truncate">{model || "Model"}</span>
-            <ChevronDown />
-          </button>
-        </DropdownTrigger>
-        <DropdownContent align="end">
-          <DropdownLabel>{provider?.name ?? "Models"}</DropdownLabel>
-          {(provider?.models ?? []).map((m) => (
-            <DropdownItem key={m} selected={m === model} onSelect={() => setModel(m)}>
-              <span className="font-mono">{m}</span>
-              {m === model && <span className="text-[10px]">●</span>}
-            </DropdownItem>
-          ))}
-          {(provider?.models ?? []).length === 0 && (
-            <DropdownItem disabled>No models found</DropdownItem>
-          )}
-        </DropdownContent>
-      </Dropdown>
-    </div>
-  );
+function ModeBadge({ mode }: { mode?: AgentMode }) {
+  if (!mode || mode === "agent") return null;
+  const m = MODES.find((x) => x.id === mode);
+  const tone = mode === "bypass" ? "amber" : "neutral";
+  return <Badge tone={tone}>{m?.label ?? mode}</Badge>;
 }
 
 function ChatMessage({ entry }: { entry: import("../stores/chat").ChatEntry }) {
   if (entry.role === "user") {
     return (
-      <div className="ml-6 rounded-lg rounded-br-sm border border-line-strong bg-zinc-800/70
-        px-3 py-2 text-[13px] leading-relaxed whitespace-pre-wrap text-zinc-100">
-        {entry.text}
+      <div className="ml-6 flex min-w-0 flex-col items-end gap-1">
+        {(entry.images?.length ?? 0) > 0 && (
+          <div className="flex max-w-full flex-wrap justify-end gap-1.5">
+            {entry.images!.map((img, i) => (
+              <img
+                key={i}
+                src={img.dataUrl}
+                alt={img.name}
+                className="max-h-28 max-w-40 rounded-lg border border-line object-cover"
+              />
+            ))}
+          </div>
+        )}
+        {entry.text && (
+          <div className="max-w-full overflow-hidden rounded-lg rounded-br-sm border border-line-strong
+            bg-zinc-800/70 px-3 py-2 text-left text-[13px] leading-relaxed whitespace-pre-wrap
+            break-words text-zinc-100">
+            {entry.text}
+          </div>
+        )}
+        <ModeBadge mode={entry.mode} />
       </div>
     );
   }
   return (
-    <div className="mr-2 flex flex-col gap-1.5">
+    <div className="mr-2 flex min-w-0 flex-col items-stretch gap-1.5">
       {entry.steps.map((step) => <ToolCallCard key={step.id} step={step} />)}
       {entry.text && (
-        <div className="rounded-lg rounded-bl-sm border border-line bg-surface-3/70 px-3 py-2
-          text-[13px] leading-relaxed whitespace-pre-wrap text-ink-1">
-          {entry.text}
+        <div className="min-w-0 max-w-full overflow-hidden rounded-lg rounded-bl-sm border border-line
+          bg-surface-3/70 px-3 py-2">
+          <Markdown text={entry.text} />
         </div>
       )}
       {entry.streaming && <span className="stream-cursor text-accent">▊</span>}
       {entry.error && (
-        <div className="rounded-lg border border-red-900/60 bg-red-950/20 px-3 py-2 text-xs text-red-400">
+        <div className="min-w-0 rounded-lg border border-red-900/60 bg-red-950/20 px-3 py-2 text-xs
+          leading-relaxed break-words text-red-400">
           ⚠ {entry.error}
         </div>
       )}
@@ -102,47 +63,48 @@ function ChatMessage({ entry }: { entry: import("../stores/chat").ChatEntry }) {
 export function ChatPanel() {
   const chat = useChatStore();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [atBottom, setAtBottom] = useState(true);
 
+  const scrollToBottom = useCallback((smooth = false) => {
+    const el = scrollRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+  }, []);
+
+  // Auto-scroll to the newest output while the user is at (or near) the bottom.
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [chat.entries, chat.pendingApprovals]);
+    if (atBottom) scrollToBottom();
+  }, [chat.entries, chat.pendingApprovals, chat.running, atBottom, scrollToBottom]);
 
-  const submit = async () => {
-    const text = chat.input;
-    if (!text.trim()) return;
-    const attachments: { path: string; content: string }[] = [];
-    for (const p of chat.pinnedPaths) {
-      try {
-        const f = await api.getFile(p);
-        attachments.push({ path: f.path, content: f.content });
-      } catch {
-        /* file gone — skip */
-      }
-    }
-    chat.send(text, attachments);
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 60);
   };
 
   return (
     <Panel className="w-full">
       <PanelHeader title="Agent">
-        <LabeledSwitch
-          checked={chat.autoApprove}
-          onCheckedChange={chat.toggleAutoApprove}
-          label="auto"
-          tooltip="Skip approval prompts (hard-blocked commands still never run)"
-        />
+        <span className="text-[10px] text-ink-3">
+          {chat.running ? `step ${chat.iteration}` : ""}
+        </span>
       </PanelHeader>
 
-      <div className="pt-2"><ModelSelectors /></div>
+      <div className="pt-2" />
 
-      <ScrollArea className="flex-1" viewportClassName="px-3">
-        <div ref={scrollRef} className="min-h-full py-2">
+      {/* plain scroll container so programmatic stick-to-bottom is reliable */}
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="relative min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-3"
+      >
+        <div className="flex min-h-full min-w-0 flex-col py-2 overflow-x-hidden">
           {chat.entries.length === 0 && (
-            <div className="rounded-lg border border-dashed border-line px-4 py-8 text-center
-              text-xs leading-relaxed text-ink-3">
+            <div className="my-auto rounded-lg border border-dashed border-line px-4 py-8
+              text-center text-xs leading-relaxed text-ink-3">
               Ask the agent to explore, write or fix code.
               <br />
-              🐙 Pin files in the Explorer to include them as context.
+              Type <span className="font-mono text-ink-2">@</span> to add files as context,
+              <span className="font-mono text-ink-2"> +</span> to attach images.
             </div>
           )}
           <div className="flex flex-col gap-2.5">
@@ -155,50 +117,21 @@ export function ChatPanel() {
           )}
           {chat.pendingApprovals.map((a) => <ApprovalCard key={a.id} approval={a} />)}
         </div>
-      </ScrollArea>
 
-      {chat.pinnedPaths.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 px-3 pb-2">
-          {chat.pinnedPaths.map((p) => (
-            <button
-              key={p}
-              onClick={() => chat.togglePin(p)}
-              className="flex items-center gap-1 rounded-md border border-line bg-surface-3
-                px-2 py-0.5 font-mono text-[10px] text-ink-2 transition-colors
-                hover:border-zinc-600 hover:text-zinc-200"
-            >
-              🐙 {p.split("/").pop()} ×
-            </button>
-          ))}
-        </div>
-      )}
-
-      <div className="flex items-end gap-2 p-3 pt-1">
-        <textarea
-          placeholder={chat.running
-            ? "Agent is running…"
-            : "Ask the agent…  (Enter to send, Shift+Enter for newline)"}
-          value={chat.input}
-          onChange={(e) => chat.setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              void submit();
-            }
-          }}
-          rows={3}
-          className="min-w-0 flex-1 resize-none rounded-lg border border-line bg-surface-0
-            px-3 py-2 text-[13px] leading-relaxed text-ink-1 placeholder:text-ink-3
-            outline-none transition-colors focus:border-zinc-600"
-        />
-        {chat.running ? (
-          <Button variant="danger" size="md" onClick={chat.cancel} title="Stop the agent">■</Button>
-        ) : (
-          <Button variant="solid" size="md" onClick={() => void submit()} disabled={!chat.model}>
-            Send
-          </Button>
+        {/* jump to bottom */}
+        {!atBottom && (
+          <button
+            onClick={() => scrollToBottom(true)}
+            className="sticky bottom-2 left-1/2 z-10 -translate-x-1/2 rounded-full
+              border border-line-strong bg-surface-3 px-3 py-1 text-[10px] text-ink-2
+              shadow-lg shadow-black/50 transition-colors hover:text-zinc-100"
+          >
+            ↓ latest
+          </button>
         )}
       </div>
+
+      <Composer />
     </Panel>
   );
 }

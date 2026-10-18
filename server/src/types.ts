@@ -33,14 +33,29 @@ export type AgentEvent =
   | { type: "agent.error"; error: string };
 
 /** Messages sent by the client over the WebSocket. */
+export type AgentMode = "agent" | "ask" | "plan" | "bypass";
+export type ToolPermission = "auto" | "approval" | "disabled";
+
+export interface ImageAttachment {
+  name: string;
+  /** data: URL (base64) — sent to the model as an image_url content part. */
+  dataUrl: string;
+}
+
 export type ClientMessage =
   | {
       type: "chat.user";
       text: string;
       providerId: string;
       model: string;
-      /** Context files the user pinned in the UI: [{path, content}] */
+      /** Context files the user pinned/@-mentioned: [{path, content}] */
       attachments?: { path: string; content: string }[];
+      /** Images uploaded in the composer (vision-capable models only). */
+      images?: ImageAttachment[];
+      /** Interaction mode: agent (tools) / ask (no tools) / plan (plan only) / bypass (tools + auto-approve). */
+      mode?: AgentMode;
+      /** Per-tool permission overrides from the tools config dialog. */
+      toolPermissions?: Record<string, ToolPermission>;
       autoApprove?: boolean;
     }
   | { type: "chat.cancel" }
@@ -66,4 +81,6 @@ export interface HarnessConfig {
     maxFileReadChars: number;
     maxSearchResults: number;
   };
+  /** Recently opened workspace roots (most recent first) — for the picker modal. */
+  recentWorkspaces?: string[];
 }

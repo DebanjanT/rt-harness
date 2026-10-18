@@ -1,11 +1,11 @@
 import http from "node:http";
 import express from "express";
 import { WebSocketServer, type WebSocket } from "ws";
-import { api } from "./api/files.js";
+import { api, setWorkspaceChangedHook } from "./api/files.js";
 import { AgentSession } from "./ws/AgentSession.js";
 import { TerminalManager } from "./ws/TerminalManager.js";
 import { getConfig } from "./config.js";
-import type { ClientMessage } from "./types.js";
+import type { AgentEvent, ClientMessage } from "./types.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
 
@@ -20,9 +20,24 @@ app.get("/api/health", (_req, res) => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
 
+// Live terminal managers — restarted when the workspace root changes.
+const terminals = new Set<TerminalManager>();
+
+// When the workspace root changes, tell every connected client to reload its
+// explorer + restart its terminal in the new root.
+setWorkspaceChangedHook(() => {
+  for (const t of terminals) t.dispose(); // next input re-spawns in the new root
+  const event: AgentEvent = { type: "file.changed", path: "*" };
+  for (const client of wss.clients) {
+    if (client.readyState === client.OPEN) client.send(JSON.stringify(event));
+  }
+  console.log("[ws] broadcast workspace change");
+});
+
 wss.on("connection", (ws: WebSocket) => {
   const session = new AgentSession(ws);
   const terminal = new TerminalManager(ws);
+  terminals.add(terminal);
   console.log("[ws] client connected");
 
   ws.on("message", (raw) => {
@@ -40,6 +55,7 @@ wss.on("connection", (ws: WebSocket) => {
 
   ws.on("close", () => {
     console.log("[ws] client disconnected");
+    terminals.delete(terminal);
     session.dispose();
     terminal.dispose();
   });

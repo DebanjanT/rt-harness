@@ -56,9 +56,9 @@ export function ToolCallCard({ step }: { step: ToolStep }) {
         : "bg-red-500";
 
   return (
-    <div className="overflow-hidden rounded-lg border border-line bg-surface-2/60 text-xs">
+    <div className="min-w-0 max-w-full overflow-hidden rounded-lg border border-line bg-surface-2/60 text-xs">
       <div
-        className="flex cursor-pointer items-center gap-2 px-2.5 py-1.5 transition-colors hover:bg-zinc-800/40"
+        className="flex min-w-0 cursor-pointer items-center gap-2 px-2.5 py-1.5 transition-colors hover:bg-zinc-800/40"
         onClick={() => setOpen((o) => !o)}
       >
         <span
@@ -66,17 +66,17 @@ export function ToolCallCard({ step }: { step: ToolStep }) {
             ${step.status === "running" ? statusDot : `border-transparent ${statusDot}`}`}
         />
         <Icon tool={step.tool} />
-        <span className="font-medium text-zinc-300">{step.tool}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-3">
+        <span className="shrink-0 font-medium text-zinc-300">{step.tool}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-3" title={summarize(step)}>
           {summarize(step)}
         </span>
         <span className={`shrink-0 text-[9px] text-ink-3 transition-transform ${open ? "rotate-90" : ""}`}>▶</span>
       </div>
       {open && (
-        <div className="max-h-56 overflow-y-auto border-t border-line bg-surface-0/60 px-2.5 py-2">
-          <pre className="text-[11px] leading-relaxed text-ink-2">{JSON.stringify(step.args, null, 2)}</pre>
+        <div className="max-h-56 overflow-y-auto overflow-x-auto border-t border-line bg-surface-0/60 px-2.5 py-2">
+          <pre className="whitespace-pre-wrap break-words text-[11px] leading-relaxed text-ink-2">{JSON.stringify(step.args, null, 2)}</pre>
           {step.result && (
-            <pre className="mt-2 border-t border-dashed border-line pt-2 text-[11px] leading-relaxed text-ink-3">
+            <pre className="mt-2 whitespace-pre-wrap break-words border-t border-dashed border-line pt-2 text-[11px] leading-relaxed text-ink-3">
               {step.result}
             </pre>
           )}

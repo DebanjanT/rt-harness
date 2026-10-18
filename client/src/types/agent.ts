@@ -2,6 +2,14 @@
 
 export type ToolCallApprovalKind = "command" | "file_write";
 
+export type AgentMode = "agent" | "ask" | "plan" | "bypass";
+export type ToolPermission = "auto" | "approval" | "disabled";
+
+export interface ImageAttachment {
+  name: string;
+  dataUrl: string;
+}
+
 export interface ApprovalRequest {
   id: string;
   kind: ToolCallApprovalKind;
@@ -33,6 +41,9 @@ export type ClientMessage =
       providerId: string;
       model: string;
       attachments?: { path: string; content: string }[];
+      images?: ImageAttachment[];
+      mode?: AgentMode;
+      toolPermissions?: Record<string, ToolPermission>;
       autoApprove?: boolean;
     }
   | { type: "chat.cancel" }
@@ -54,3 +65,28 @@ export interface ProviderInfo {
   baseURL: string;
   models: string[];
 }
+
+export interface ModelCapabilities {
+  tools: boolean;
+  vision: boolean;
+  notes: string[];
+}
+
+export const KNOWN_TOOLS = [
+  "read_file",
+  "list_directory",
+  "search_files",
+  "write_file",
+  "edit_file",
+  "execute_command",
+  "git_status",
+  "git_diff",
+  "git_log",
+] as const;
+
+export const MODES: { id: AgentMode; label: string; hint: string }[] = [
+  { id: "agent", label: "Agent", hint: "Full tool access — reads, writes and runs commands (with approval)" },
+  { id: "ask", label: "Ask", hint: "Answer questions only — no tools, no changes" },
+  { id: "plan", label: "Plan", hint: "Investigate and produce a plan — no changes until you approve" },
+  { id: "bypass", label: "Bypass", hint: "Agent with auto-approved tools — use with care" },
+];

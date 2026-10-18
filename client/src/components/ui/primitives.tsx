@@ -8,6 +8,8 @@ import * as SwitchPrimitive from "@radix-ui/react-switch";
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import * as ScrollAreaPrimitive from "@radix-ui/react-scroll-area";
 import * as SeparatorPrimitive from "@radix-ui/react-separator";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import * as PopoverPrimitive from "@radix-ui/react-popover";
 
 /* ---------------- Button ---------------- */
 
@@ -228,5 +230,95 @@ export function Badge({
       text-[10px] font-medium ${tones[tone]}`}>
       {children}
     </span>
+  );
+}
+
+/* ---------------- Dialog (Radix) ---------------- */
+
+export const Dialog = DialogPrimitive.Root;
+export const DialogTrigger = DialogPrimitive.Trigger;
+
+export function DialogContent({
+  title,
+  description,
+  children,
+  className = "",
+}: {
+  title: string;
+  description?: string;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <DialogPrimitive.Portal>
+      <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm
+        [animation:fadeIn_150ms_ease-out]" />
+      <DialogPrimitive.Content
+        className={`fixed left-1/2 top-1/2 z-50 w-[420px] max-w-[92vw] -translate-x-1/2 -translate-y-1/2
+          rounded-xl border border-line-strong bg-surface-2 p-4 shadow-2xl shadow-black/70
+          outline-none [animation:popIn_150ms_ease-out] ${className}`}
+      >
+        <DialogPrimitive.Title className="text-sm font-semibold text-zinc-100">{title}</DialogPrimitive.Title>
+        {description && (
+          <DialogPrimitive.Description className="mt-1 text-xs leading-relaxed text-ink-3">
+            {description}
+          </DialogPrimitive.Description>
+        )}
+        <div className="mt-4">{children}</div>
+        <DialogPrimitive.Close asChild>
+          <button
+            className="absolute right-3 top-3 rounded-md p-1 text-ink-3 transition-colors
+              hover:bg-zinc-800 hover:text-zinc-200"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </DialogPrimitive.Close>
+      </DialogPrimitive.Content>
+    </DialogPrimitive.Portal>
+  );
+}
+
+export function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="mb-3 block">
+      <span className="mb-1 block text-[11px] font-medium text-ink-2">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+export const inputClasses =
+  "w-full rounded-md border border-line bg-surface-0 px-2.5 py-1.5 text-xs text-ink-1 " +
+  "placeholder:text-ink-3 outline-none transition-colors focus:border-zinc-600";
+
+/* ---------------- Popover (Radix) ---------------- */
+
+export const Popover = PopoverPrimitive.Root;
+export const PopoverTrigger = PopoverPrimitive.Trigger;
+
+export function PopoverContent({
+  children,
+  align = "start",
+  side = "top",
+  className = "",
+}: {
+  children: React.ReactNode;
+  align?: "start" | "center" | "end";
+  side?: "top" | "bottom" | "left" | "right";
+  className?: string;
+}) {
+  return (
+    <PopoverPrimitive.Portal>
+      <PopoverPrimitive.Content
+        align={align}
+        side={side}
+        sideOffset={6}
+        className={`z-50 w-80 max-w-[92vw] rounded-lg border border-line-strong bg-surface-3
+          p-3 shadow-xl shadow-black/60 outline-none [animation:popIn_120ms_ease-out] ${className}`}
+      >
+        {children}
+      </PopoverPrimitive.Content>
+    </PopoverPrimitive.Portal>
   );
 }

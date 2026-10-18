@@ -62,6 +62,9 @@ export class AgentSession {
     const attachments = (msg.attachments ?? []).filter(
       (a) => typeof a.path === "string" && typeof a.content === "string",
     );
+    const images = (msg.images ?? []).filter(
+      (i) => typeof i?.dataUrl === "string" && i.dataUrl.startsWith("data:image/"),
+    );
 
     await runAgent(
       {
@@ -69,6 +72,9 @@ export class AgentSession {
         model: msg.model,
         userText: msg.text,
         attachments,
+        images,
+        mode: msg.mode,
+        toolPermissions: msg.toolPermissions,
         history: this.history.slice(-20),
         autoApprove: Boolean(msg.autoApprove),
         signal: controller.signal,

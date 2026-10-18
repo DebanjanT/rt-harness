@@ -21,24 +21,25 @@ export function ApprovalCard({ approval }: { approval: PendingApproval }) {
   const kindLabel = approval.kind === "command" ? "Run command" : "Modify file";
 
   return (
-    <div className={`my-2 rounded-lg border p-2.5 transition-colors
+    <div className={`my-2 min-w-0 max-w-full overflow-hidden rounded-lg border p-2.5 transition-colors
       ${approval.resolved === "approved"
         ? "border-emerald-900/60 bg-emerald-950/10"
         : approval.resolved === "denied"
           ? "border-red-900/60 bg-red-950/10 opacity-75"
           : "border-amber-900/70 bg-amber-950/10"}`}>
-      <div className="mb-2 flex items-center justify-between">
-        <span className="flex items-center gap-1.5 text-[11px] font-semibold text-amber-400">
-          <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-semibold text-amber-400">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="shrink-0">
             <path d="M8 1.5L15 13.5H1L8 1.5z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
             <path d="M8 6v3.5 M8 11.5v.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
           </svg>
-          {kindLabel} — approval required
+          <span className="truncate">{kindLabel} — approval required</span>
         </span>
         <Badge tone={approval.kind === "command" ? "amber" : "neutral"}>{approval.tool}</Badge>
       </div>
 
-      <pre className="rounded-md border border-line bg-surface-0 px-2.5 py-2 font-mono text-xs text-zinc-200">
+      <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-md border border-line bg-surface-0
+        px-2.5 py-2 font-mono text-xs text-zinc-200">
         {approval.summary}
       </pre>
 

@@ -1,5 +1,5 @@
 import type OpenAI from "openai";
-import type { AgentEvent, ProviderConfig } from "../types.js";
+import type { AgentEvent, AgentMode, ImageAttachment, ProviderConfig, ToolPermission } from "../types.js";
 import { createLLM } from "../llm/provider.js";
 import { getConfig } from "../config.js";
 import { buildSystemPrompt, buildAttachmentBlock, type ContextInput } from "./ContextBuilder.js";
@@ -19,6 +19,12 @@ export interface AgentRunOptions extends ContextInput {
   signal: AbortSignal;
   requestApproval: ToolContext["requestApproval"];
   onFileChanged: (path: string) => void;
+  /** Images uploaded from the composer (sent as image_url content parts). */
+  images?: ImageAttachment[];
+  /** agent (default) | ask | plan | bypass */
+  mode?: AgentMode;
+  /** Per-tool permission overrides from the tools config dialog. */
+  toolPermissions?: Record<string, ToolPermission>;
 }
 
 interface PendingToolCall {
@@ -80,10 +86,25 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
   // calling tools (e.g. "you can run: touch sample.txt").
   let nudged = false;
 
+  const mode: AgentMode = opts.mode ?? "agent";
+  const useTools = mode === "agent" || mode === "bypass";
+  const effectiveAutoApprove = opts.autoApprove || mode === "bypass";
+
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-    { role: "system", content: await buildSystemPrompt(opts) + buildAttachmentBlock(opts.attachments) },
+    { role: "system", content: await buildSystemPrompt(opts, mode) + buildAttachmentBlock(opts.attachments) },
     ...opts.history,
-    { role: "user", content: opts.userText },
+    {
+      role: "user",
+      // Multimodal content when images are attached (vision-capable models).
+      ...(opts.images?.length
+        ? {
+            content: [
+              { type: "text" as const, text: opts.userText || "Describe the attached image(s)." },
+              ...opts.images.map((img) => ({ type: "image_url" as const, image_url: { url: img.dataUrl } })),
+            ],
+          }
+        : { content: opts.userText }),
+    },
   ];
 
   emit({ type: "agent.started", providerId: opts.provider.id, model: opts.model });
@@ -97,10 +118,18 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
       return msg;
     }
 
+    // Per-tool permission overrides from the tools config dialog.
+    const override = opts.toolPermissions?.[tool.name];
+    if (override === "disabled") {
+      const msg = `Tool "${tool.name}" has been disabled by the user in the tools settings. Do not call it again; accomplish the task without it or explain what you need.`;
+      emit({ type: "tool.finished", id: callId, tool: tool.name, ok: false, result: msg });
+      return msg;
+    }
+
     emit({ type: "tool.started", id: callId, tool: tool.name, args });
 
     const ctx: ToolContext = {
-      autoApprove: opts.autoApprove,
+      autoApprove: effectiveAutoApprove || override === "auto",
       signal: opts.signal,
       onFileChanged: opts.onFileChanged,
       requestApproval: async (req) => {
@@ -150,18 +179,27 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
           model: opts.model,
           messages,
           // Some servers/models reject the tools param entirely — retry without.
-          ...(nativeToolsUnsupported ? {} : { tools: openaiTools }),
+          ...(useTools && !nativeToolsUnsupported ? { tools: openaiTools } : {}),
           stream: true,
           // NOTE: no stream_options — many local OpenAI-compatible servers reject it.
         });
       } catch (err) {
         const status = (err as { status?: number }).status;
         const msg = (err as Error).message ?? "";
-        if (!nativeToolsUnsupported && status === 400 && msg.toLowerCase().includes("tool")) {
+        if (useTools && !nativeToolsUnsupported && status === 400 && msg.toLowerCase().includes("tool")) {
           console.warn("[agent] server rejected tools param — falling back to text tool calls");
           nativeToolsUnsupported = true;
           iteration--; // retry this iteration without tools
           continue;
+        }
+        if (/image|vision|multimodal/i.test(msg)) {
+          emit({
+            type: "agent.error",
+            error:
+              `The selected model "${opts.model}" does not support image input (vision). ` +
+              "Remove the attached image(s) or switch to a vision-capable model.",
+          });
+          return;
         }
         throw err;
       }
@@ -231,6 +269,7 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
         // instead of acting. Nudge it once and let the loop continue.
         if (
           !nudged &&
+          useTools &&
           !opts.signal.aborted &&
           iteration < cfg.agent.maxIterations &&
           looksLikeInstructionText(content)

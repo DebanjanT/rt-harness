@@ -1,12 +1,20 @@
 import os from "node:os";
 import { getTreeText, getTree } from "../workspace/FileSystem.js";
 import type { FileNode } from "../workspace/FileSystem.js";
+import type { AgentMode } from "../types.js";
 
 export interface ContextInput {
   userText: string;
   attachments: { path: string; content: string }[];
   openFilePath?: string;
 }
+
+const MODE_INSTRUCTIONS: Record<AgentMode, string> = {
+  agent: "Mode: AGENT — use tools to complete the task fully, then summarize.",
+  ask: "Mode: ASK — answer questions using your knowledge and the context provided. Do NOT call any tools; do not modify anything.",
+  plan: "Mode: PLAN — do NOT modify anything. Investigate if needed, then produce a clear step-by-step implementation plan (files to change, in what order, risks, verification steps). The user will approve the plan before execution.",
+  bypass: "Mode: BYPASS — tools run without approval prompts. Be extra careful and precise; prefer read tools first, verify paths before writing, and summarize exactly what you changed.",
+};
 
 /**
  * Level 1–3 context strategy:
@@ -16,19 +24,22 @@ export interface ContextInput {
  *
  * We deliberately do NOT dump the whole repo: small local models drown.
  */
-export async function buildSystemPrompt(input: ContextInput): Promise<string> {
+export async function buildSystemPrompt(input: ContextInput, mode: AgentMode = "agent"): Promise<string> {
   const treeText = await getTreeText(250);
   const attachmentNames = input.attachments.map((a) => a.path).join(", ") || "none";
+  const useTools = mode === "agent" || mode === "bypass";
 
-  const knownToolHints = [
-    "- read_file(path, start_line?, end_line?) — read a file",
-    "- list_directory(path?) — list a directory",
-    "- search_files(query, is_regex?, include?) — search file contents",
-    "- write_file(path, content) — create or fully overwrite a file",
-    "- edit_file(path, old_text, new_text) — replace an exact unique substring",
-    "- execute_command(command, timeout_ms?) — run a shell command (user approves)",
-    "- git_status() / git_diff(path?) / git_log(count?) — inspect git state",
-  ].join("\n");
+  const knownToolHints = useTools
+    ? [
+        "- read_file(path, start_line?, end_line?) — read a file",
+        "- list_directory(path?) — list a directory",
+        "- search_files(query, is_regex?, include?) — search file contents",
+        "- write_file(path, content) — create or fully overwrite a file",
+        "- edit_file(path, old_text, new_text) — replace an exact unique substring",
+        "- execute_command(command, timeout_ms?) — run a shell command (user approves)",
+        "- git_status() / git_diff(path?) / git_log(count?) — inspect git state",
+      ].join("\n")
+    : "(tools are disabled in this mode)";
 
   return `You are rt-harness, an expert AI coding agent operating inside a local web IDE.
 
@@ -71,6 +82,7 @@ ${knownToolHints}
 6. If the request is ambiguous, make a reasonable assumption, state it, and proceed.
 7. Context: user pinned files = ${attachmentNames}. CWD is the workspace root.
    Platform: ${os.platform()}.
+8. ${MODE_INSTRUCTIONS[mode]}
 
 Final answers: plain, concise markdown.`;
 }
