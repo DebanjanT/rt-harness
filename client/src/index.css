@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+@theme {
+  --color-surface-0: #09090b;   /* deepest — editor, terminal */
+  --color-surface-1: #0f1012;   /* app background */
+  --color-surface-2: #16171a;   /* panels, sidebar */
+  --color-surface-3: #1e2024;   /* raised cards, inputs */
+  --color-surface-4: #27292e;   /* hover states */
+  --color-line: #26282d;        /* borders */
+  --color-line-strong: #34363c;
+  --color-ink-1: #e4e4e7;       /* primary text */
+  --color-ink-2: #a1a1aa;       /* secondary text */
+  --color-ink-3: #63636b;       /* muted text */
+  --color-accent: #d4d4d8;      /* monochrome accent */
+  --font-mono: "SF Mono", Menlo, Monaco, Consolas, monospace;
+}
+
+html, body, #root { height: 100%; }
+
+body {
+  background: var(--color-surface-1);
+  color: var(--color-ink-1);
+  font-size: 13px;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+pre, code { font-family: var(--font-mono); }
+
+/* xterm fills its container */
+.xterm, .xterm .xterm-viewport { border-radius: inherit; }
+
+/* thin, unobtrusive scrollbars */
+*::-webkit-scrollbar { width: 6px; height: 6px; }
+*::-webkit-scrollbar-thumb { background: #2e3036; border-radius: 3px; }
+*::-webkit-scrollbar-thumb:hover { background: #3c3e45; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-corner { background: transparent; }
+
+@keyframes blink { 50% { opacity: 0; } }
+.stream-cursor { animation: blink 1s step-start infinite; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 0.9s linear infinite; }
+
+/* diff coloring inside approval cards */
+.diff-add { color: #7dd4a8; background: rgba(52, 211, 153, 0.07); display: block; }
+.diff-del { color: #e08f8c; background: rgba(248, 113, 113, 0.07); display: block; }

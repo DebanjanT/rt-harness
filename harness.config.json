@@ -1,0 +1,24 @@
+{
+  "workspaceRoot": ".",
+  "providers": [
+    {
+      "id": "ollama",
+      "name": "Ollama (local)",
+      "baseURL": "http://127.0.0.1:11434/v1",
+      "apiKey": "ollama",
+      "models": []
+    },
+    {
+      "id": "freetoken",
+      "name": "FreeToken (local)",
+      "baseURL": "http://127.0.0.1:1919/v1",
+      "apiKey": "freetoken",
+      "models": []
+    }
+  ],
+  "agent": {
+    "maxIterations": 25,
+    "maxFileReadChars": 60000,
+    "maxSearchResults": 50
+  }
+}
