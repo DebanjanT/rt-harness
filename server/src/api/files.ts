@@ -164,7 +164,8 @@ api.delete("/providers/:id", (req, res) => {
 export interface ModelCapabilities {
   tools: boolean;
   vision: boolean;
-  /** Human-readable detail when a capability is missing. */
+  /** Model accepts OpenAI-style reasoning_effort (o-series, GPT-5, Qwen3-thinking…). */
+  thinking: boolean;
   notes: string[];
 }
 
@@ -181,7 +182,7 @@ export function probeCapabilities(baseURL: string, apiKey: string, model: string
 
   const client = createLLM({ id: "probe", name: "probe", baseURL, apiKey });
   const notes: string[] = [];
-  const caps: ModelCapabilities = { tools: true, vision: true, notes: [] };
+  const caps: ModelCapabilities = { tools: true, vision: true, thinking: true, notes: [] };
 
   const probeTools = client.chat.completions
     .create({
@@ -228,7 +229,23 @@ export function probeCapabilities(baseURL: string, apiKey: string, model: string
       }
     });
 
-  return Promise.all([probeTools, probeVision]).then(() => {
+  // Thinking: send reasoning_effort and see whether the server accepts it.
+  const probeThinking = client.chat.completions
+    .create({
+      model,
+      messages: [{ role: "user", content: "hi" }],
+      reasoning_effort: "low",
+      max_tokens: 5,
+      stream: false,
+    } as never)
+    .then(() => {})
+    .catch((err: Error) => {
+      if (/reasoning|thinking|effort|unknown|unexpected|invalid/i.test(err.message)) {
+        caps.thinking = false;
+      }
+    });
+
+  return Promise.all([probeTools, probeVision, probeThinking]).then(() => {
     caps.notes = notes;
     capCache.set(key, caps);
     return caps;

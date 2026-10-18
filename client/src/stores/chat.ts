@@ -6,6 +6,7 @@ import type {
   ImageAttachment,
   ModelCapabilities,
   ProviderInfo,
+  ThinkingEffort,
   ToolPermission,
 } from "../types/agent";
 import { harnessSocket } from "../lib/websocket";
@@ -19,20 +20,29 @@ export interface ToolStep {
   result?: string;
 }
 
+export type PendingApproval = ApprovalRequest & {
+  resolved?: "approved" | "denied";
+};
+
+/**
+ * Ordered timeline of an assistant turn. This is what makes the conversation
+ * read in true sequence: text → tool call → approval → more text.
+ */
+export type Segment =
+  | { kind: "text"; text: string }
+  | { kind: "thinking"; text: string }
+  | { kind: "tool"; step: ToolStep }
+  | { kind: "approval"; approval: PendingApproval };
+
 export interface ChatEntry {
   role: "user" | "assistant";
-  text: string;
-  steps: ToolStep[];
+  segments: Segment[];
   streaming?: boolean;
   error?: string;
   /** Images attached to a user message. */
   images?: ImageAttachment[];
   /** Mode the message was sent in (shown as a small badge). */
   mode?: AgentMode;
-}
-
-export interface PendingApproval extends ApprovalRequest {
-  resolved?: "approved" | "denied";
 }
 
 export interface UsageStats {
@@ -50,14 +60,20 @@ interface ChatState {
   entries: ChatEntry[];
   running: boolean;
   iteration: number;
-  /** Length of the last assistant message when the current agent iteration began. */
-  iterationTextStart: number;
-  pendingApprovals: PendingApproval[];
+  /**
+   * Where the current agent iteration's text begins in the last assistant
+   * entry's timeline — used by message.done to swap raw streamed text (which
+   * may include tool-call syntax) for the server-cleaned version.
+   */
+  iterSegIdx: number;
+  iterCharStart: number;
   providers: ProviderInfo[];
   providerId: string;
   model: string;
   mode: AgentMode;
   autoApprove: boolean;
+  /** Reasoning effort for thinking-capable models. */
+  thinkingEffort: ThinkingEffort;
   /** Per-tool permission overrides ("auto" | "approval" | "disabled"). */
   toolPermissions: Record<string, ToolPermission>;
   /** @-mentioned / pinned workspace files (paths). */
@@ -77,6 +93,7 @@ interface ChatState {
   setProvider: (id: string) => void;
   setModel: (m: string) => void;
   setMode: (m: AgentMode) => void;
+  setThinkingEffort: (e: ThinkingEffort) => void;
   toggleAutoApprove: () => void;
   setToolPermission: (tool: string, perm: ToolPermission) => void;
   togglePin: (path: string) => void;
@@ -88,6 +105,41 @@ interface ChatState {
   cancel: () => void;
   resolveApproval: (id: string, approved: boolean) => void;
   handleEvent: (event: AgentEvent) => void;
+}
+
+/* ---------- timeline helpers ---------- */
+
+function appendText(segments: Segment[], t: string): Segment[] {
+  if (!t) return segments;
+  const last = segments[segments.length - 1];
+  if (last && last.kind === "text") {
+    return [...segments.slice(0, -1), { kind: "text", text: last.text + t }];
+  }
+  return [...segments, { kind: "text", text: t }];
+}
+
+function updateToolSegment(
+  segments: Segment[],
+  id: string,
+  patch: Partial<ToolStep>,
+): Segment[] {
+  return segments.map((seg) =>
+    seg.kind === "tool" && seg.step.id === id
+      ? { ...seg, step: { ...seg.step, ...patch } }
+      : seg,
+  );
+}
+
+function updateApprovalSegment(
+  segments: Segment[],
+  id: string,
+  resolved: "approved" | "denied",
+): Segment[] {
+  return segments.map((seg) =>
+    seg.kind === "approval" && seg.approval.id === id
+      ? { ...seg, approval: { ...seg.approval, resolved } }
+      : seg,
+  );
 }
 
 function updateLastAssistant(
@@ -115,13 +167,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   entries: [],
   running: false,
   iteration: 0,
-  iterationTextStart: 0,
-  pendingApprovals: [],
+  iterSegIdx: 0,
+  iterCharStart: 0,
   providers: [],
   providerId: "",
   model: "",
   mode: "agent",
   autoApprove: false,
+  thinkingEffort: "off",
   toolPermissions: {},
   pinnedPaths: [],
   images: [],
@@ -158,6 +211,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setModel: (m) => set({ model: m, capabilities: null }),
 
   setMode: (m) => set({ mode: m }),
+
+  setThinkingEffort: (e) => set({ thinkingEffort: e }),
 
   toggleAutoApprove: () => set((s) => ({ autoApprove: !s.autoApprove })),
 
@@ -212,7 +267,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   send: async (text) => {
-    const { providerId, model, autoApprove, mode, toolPermissions, pinnedPaths, images } = get();
+    const { providerId, model, autoApprove, mode, toolPermissions, pinnedPaths, images, thinkingEffort } = get();
     if ((!text.trim() && images.length === 0) || !model) return;
 
     // Fetch @-mentioned file contents before sending.
@@ -228,10 +283,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     set((s) => ({
       entries: [...s.entries,
-        { role: "user", text, steps: [], images: images.length ? [...images] : undefined, mode } as ChatEntry,
-        { role: "assistant", text: "", steps: [], streaming: true } as ChatEntry],
+        {
+          role: "user",
+          segments: text.trim() ? [{ kind: "text", text } as Segment] : [],
+          images: images.length ? [...images] : undefined,
+          mode,
+        } as ChatEntry,
+        { role: "assistant", segments: [], streaming: true } as ChatEntry],
       running: true,
       iteration: 0,
+      iterSegIdx: 0,
+      iterCharStart: 0,
       input: "",
       // Clear the composer context after send: images AND @-file references
       // (their contents are already captured in the outgoing message).
@@ -245,6 +307,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       model,
       mode,
       toolPermissions,
+      thinkingEffort,
       images,
       attachments,
       autoApprove,
@@ -255,9 +318,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   resolveApproval: (id, approved) => {
     harnessSocket.send({ type: "chat.approve", id, approved });
+    // Optimistic UI update; the server echoes approval.resolved too.
     set((s) => ({
-      pendingApprovals: s.pendingApprovals.map((a) =>
-        a.id === id ? { ...a, resolved: approved ? ("approved" as const) : ("denied" as const) } : a,
+      entries: s.entries.map((en) =>
+        en.role === "assistant"
+          ? { ...en, segments: updateApprovalSegment(en.segments, id, approved ? "approved" : "denied") }
+          : en,
       ),
     }));
   },
@@ -267,79 +333,149 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "agent.started":
         set({ iteration: 0, usage: null });
         break;
-      case "usage":
-        set({
-          usage: {
-            inputTokens: event.inputTokens,
-            outputTokens: event.outputTokens,
-            totalInputTokens: event.totalInputTokens,
-            totalOutputTokens: event.totalOutputTokens,
-            requests: event.requests,
-            tokensPerSec: event.tokensPerSec,
-            contextTokens: event.contextTokens,
-            contextWindow: event.contextWindow,
-          },
-        });
-        break;
+
       case "agent.iteration":
         set((s) => {
           const last = s.entries[s.entries.length - 1];
-          return {
-            iteration: event.iteration,
-            iterationTextStart: last?.role === "assistant" ? last.text.length : 0,
-          };
+          let segIdx = 0;
+          let charStart = 0;
+          if (last?.role === "assistant") {
+            const lastSeg = last.segments[last.segments.length - 1];
+            if (lastSeg?.kind === "text") {
+              segIdx = last.segments.length - 1;
+              charStart = lastSeg.text.length;
+            } else {
+              segIdx = last.segments.length;
+              charStart = 0;
+            }
+          }
+          return { iteration: event.iteration, iterSegIdx: segIdx, iterCharStart: charStart };
         });
         break;
+
       case "message.delta":
-        set((s) => ({
-          entries: updateLastAssistant(s.entries, (e) => ({ ...e, text: e.text + event.text })),
-        }));
-        break;
-      case "message.done":
-        // The server may clean the streamed text (e.g. strip text-mode tool-call
-        // syntax). Replace only THIS iteration's portion of the message so text
-        // from earlier iterations is preserved.
         set((s) => ({
           entries: updateLastAssistant(s.entries, (e) => ({
             ...e,
-            text:
-              event.text !== ""
-                ? e.text.slice(0, s.iterationTextStart) + event.text
-                : e.text,
-            streaming: false,
+            segments: appendText(e.segments, event.text),
           })),
         }));
         break;
+
+      case "thinking.delta":
+        set((s) => ({
+          entries: updateLastAssistant(s.entries, (e) => {
+            const segs = [...(Array.isArray(e.segments) ? e.segments : [])];
+            const last = segs[segs.length - 1];
+            if (last && last.kind === "thinking") {
+              segs[segs.length - 1] = { kind: "thinking", text: last.text + event.text };
+            } else {
+              segs.push({ kind: "thinking", text: event.text });
+            }
+            return { ...e, segments: segs };
+          }),
+        }));
+        break;
+
+      case "message.done": {
+        // The server may clean the streamed text (strip text-mode tool-call
+        // syntax). Replace THIS iteration's raw text with the cleaned version
+        // IN PLACE — the raw stream is the first text segment at/after
+        // iterSegIdx; thinking/tool segments around it keep their positions.
+        set((s) => ({
+          entries: updateLastAssistant(s.entries, (e) => {
+            if (event.text === "") return e;
+            const segs = [...(Array.isArray(e.segments) ? e.segments : [])];
+            const startIdx = Math.min(s.iterSegIdx, segs.length);
+            const segAt = segs[startIdx];
+
+            if (segAt?.kind === "text") {
+              // The iteration's raw stream continued the segment that existed
+              // at iteration start — replace its tail with the cleaned text.
+              const prefix = segAt.text.slice(0, s.iterCharStart);
+              segs[startIdx] = { kind: "text", text: prefix + event.text };
+              return { ...e, segments: segs };
+            }
+
+            // Text started a fresh segment after thinking/tool segments. The
+            // raw stream may span multiple text segments (thinking interleaved
+            // mid-stream). If cleaning didn't change anything, keep the nice
+            // interleaved layout as-is; otherwise place the cleaned text at
+            // the FIRST text position, dropping the other raw text segments.
+            const textIdxs: number[] = [];
+            segs.forEach((seg, i) => {
+              if (i >= startIdx && seg.kind === "text") textIdxs.push(i);
+            });
+            if (textIdxs.length > 0) {
+              const combinedRaw = textIdxs.map((i) => (segs[i] as { text: string }).text).join("");
+              if (combinedRaw === event.text) {
+                return { ...e, segments: segs }; // nothing stripped — keep layout
+              }
+              const first = textIdxs[0]!;
+              segs[first] = { kind: "text", text: event.text };
+              for (let k = textIdxs.length - 1; k >= 1; k--) segs.splice(textIdxs[k], 1);
+              return { ...e, segments: segs };
+            }
+            // No raw text was streamed (e.g. placeholder case) — append.
+            segs.push({ kind: "text", text: event.text });
+            return { ...e, segments: segs };
+          }),
+        }));
+        break;
+      }
+
       case "tool.started":
         set((s) => ({
           entries: updateLastAssistant(s.entries, (e) => ({
             ...e,
-            steps: [...e.steps, { id: event.id, tool: event.tool, args: event.args, status: "running" }],
+            segments: [...e.segments, {
+              kind: "tool",
+              step: { id: event.id, tool: event.tool, args: event.args, status: "running" },
+            } as Segment],
           })),
         }));
         break;
+
       case "tool.finished":
         set((s) => ({
           entries: updateLastAssistant(s.entries, (e) => ({
             ...e,
-            steps: e.steps.map((st) =>
-              st.id === event.id ? { ...st, status: event.ok ? ("ok" as const) : ("error" as const), result: event.result } : st,
-            ),
+            segments: updateToolSegment(e.segments, event.id, {
+              status: event.ok ? "ok" : "error",
+              result: event.result,
+            }),
           })),
         }));
         break;
-      case "approval.required":
-        set((s) => ({ pendingApprovals: [...s.pendingApprovals, { ...event.approval }] }));
+
+      case "approval.required": {
+        const approval: PendingApproval = { ...event.approval };
+        set((s) => ({
+          entries: updateLastAssistant(s.entries, (e) => ({
+            ...e,
+            segments: [...e.segments, { kind: "approval", approval } as Segment],
+          })),
+        }));
         break;
+      }
+
       case "approval.resolved":
-        // keep card visible with resolved badge; nothing to do
+        set((s) => ({
+          entries: s.entries.map((en) =>
+            en.role === "assistant"
+              ? { ...en, segments: updateApprovalSegment(en.segments, event.id, event.approved ? "approved" : "denied") }
+              : en,
+          ),
+        }));
         break;
+
       case "agent.finished":
         set((s) => ({
           running: false,
           entries: updateLastAssistant(s.entries, (e) => ({ ...e, streaming: false })),
         }));
         break;
+
       case "agent.error":
         set((s) => ({
           running: false,
@@ -350,6 +486,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           })),
         }));
         break;
+
       default:
         break;
     }

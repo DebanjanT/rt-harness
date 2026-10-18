@@ -37,6 +37,8 @@ export async function buildSystemPrompt(input: ContextInput, mode: AgentMode = "
         "- write_file(path, content) — create or fully overwrite a file",
         "- edit_file(path, old_text, new_text) — replace an exact unique substring",
         "- execute_command(command, timeout_ms?) — run a shell command (user approves)",
+        "- web_search(query, max_results?) — search the web for current information",
+        "- fetch_url(url, max_chars?) — read a web page as text",
         "- git_status() / git_diff(path?) / git_log(count?) — inspect git state",
       ].join("\n")
     : "(tools are disabled in this mode)";

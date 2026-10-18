@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useChatStore } from "../stores/chat";
 import { useWorkspaceStore } from "../stores/workspace";
 import { api } from "../lib/api";
-import type { FileNode, AgentMode, ToolPermission } from "../types/agent";
-import { MODES, KNOWN_TOOLS } from "../types/agent";
+import type { FileNode, AgentMode, ToolPermission, ThinkingEffort } from "../types/agent";
+import { MODES, KNOWN_TOOLS, THINKING_LEVELS } from "../types/agent";
 import { ModelSwitcher } from "./ModelSwitcher";
 import {
   Dropdown, DropdownTrigger, DropdownContent, DropdownItem, DropdownLabel,
@@ -132,6 +132,37 @@ function ToolsPermissionPopover() {
         </div>
       </PopoverContent>
     </Popover>
+  );
+}
+
+/* ---------------- thinking effort selector ---------------- */
+
+function ThinkingSelector() {
+  const { thinkingEffort, setThinkingEffort } = useChatStore();
+  const current = THINKING_LEVELS.find((l) => l.id === thinkingEffort)!;
+
+  return (
+    <Dropdown>
+      <Tooltip content="Reasoning depth — only shown for models that accept reasoning_effort">
+        <DropdownTrigger asChild>
+          <Button variant="ghost" size="sm" className={thinkingEffort !== "off" ? "text-zinc-100" : ""}>
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+              <path d="M8 1.5a4.5 4.5 0 0 1 4.5 4.5c0 1.7-.9 2.9-1.7 3.9-.5.7-.8 1.2-.8 2.1h-4c0-.9-.3-1.4-.8-2.1C4.4 8.9 3.5 7.7 3.5 6A4.5 4.5 0 0 1 8 1.5zM6 14h4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            {current.label.replace("Thinking: ", "")}
+          </Button>
+        </DropdownTrigger>
+      </Tooltip>
+      <DropdownContent>
+        <DropdownLabel>Reasoning effort</DropdownLabel>
+        {THINKING_LEVELS.map((l) => (
+          <DropdownItem key={l.id} selected={l.id === thinkingEffort} onSelect={() => setThinkingEffort(l.id)}>
+            {l.label}
+            {l.id === thinkingEffort && <span className="text-[10px]">●</span>}
+          </DropdownItem>
+        ))}
+      </DropdownContent>
+    </Dropdown>
   );
 }
 
@@ -300,11 +331,17 @@ export function Composer() {
     }
 
     if (chat.images.length > 0 && chat.capabilities && !chat.capabilities.vision) {
+      // Vision-guard: refuse BEFORE sending. Pushed as a proper assistant
+      // entry (with segments!) so the timeline stays consistent.
       useChatStore.setState((s) => ({
-        entries: [...s.entries, {
-          role: "assistant", text: "", steps: [],
-          error: `The selected model "${chat.model}" does not support image input (vision). Remove the image(s) or switch to a vision-capable model.`,
-        } as never],
+        entries: [...s.entries,
+          { role: "user", segments: [{ kind: "text", text: chat.input }], images: [...chat.images] } as never,
+          {
+            role: "assistant",
+            segments: [],
+            error: `The selected model "${chat.model}" does not support image input (vision). ` +
+              "Remove the image(s) or switch to a vision-capable model.",
+          } as never],
       }));
       return;
     }
@@ -448,6 +485,8 @@ export function Composer() {
         </Dropdown>
 
         <ModeSelector />
+        {/* Thinking selector only for models that accept reasoning_effort */}
+        {chat.capabilities?.thinking && <ThinkingSelector />}
         <ModelSwitcher />
         <div className="flex-1" />
         <ToolsPermissionPopover />

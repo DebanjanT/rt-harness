@@ -75,6 +75,7 @@ export class AgentSession {
         images,
         mode: msg.mode,
         toolPermissions: msg.toolPermissions,
+        thinkingEffort: msg.thinkingEffort,
         history: this.history.slice(-20),
         autoApprove: Boolean(msg.autoApprove),
         signal: controller.signal,

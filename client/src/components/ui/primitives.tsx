@@ -89,21 +89,22 @@ export function DropdownContent({
   );
 }
 
-export function DropdownItem({
-  selected,
-  className = "",
-  ...props
-}: React.ComponentProps<typeof DropdownMenuPrimitive.Item> & { selected?: boolean }) {
+export const DropdownItem = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Item>,
+  React.ComponentProps<typeof DropdownMenuPrimitive.Item> & { selected?: boolean }
+>(function DropdownItem({ selected, className = "", ...props }, ref) {
   return (
     <DropdownMenuPrimitive.Item
+      ref={ref}
       className={`flex cursor-pointer items-center justify-between rounded-md px-2.5 py-1.5
         text-xs outline-none transition-colors
         data-[highlighted]:bg-zinc-700/50 data-[highlighted]:text-zinc-100
+        data-[disabled]:pointer-events-none data-[disabled]:opacity-40
         ${selected ? "text-zinc-100" : "text-zinc-400"} ${className}`}
       {...props}
     />
   );
-}
+});
 
 export function DropdownLabel({ children }: { children: React.ReactNode }) {
   return (

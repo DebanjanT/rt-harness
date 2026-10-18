@@ -4,6 +4,15 @@ export type ToolCallApprovalKind = "command" | "file_write";
 
 export type AgentMode = "agent" | "ask" | "plan" | "bypass";
 export type ToolPermission = "auto" | "approval" | "disabled";
+/** Reasoning effort for thinking-capable models (provider-dependent). */
+export type ThinkingEffort = "off" | "low" | "medium" | "high" | "max";
+export const THINKING_LEVELS: { id: ThinkingEffort; label: string }[] = [
+  { id: "off", label: "Thinking: off" },
+  { id: "low", label: "Thinking: low" },
+  { id: "medium", label: "Thinking: medium" },
+  { id: "high", label: "Thinking: high" },
+  { id: "max", label: "Thinking: max" },
+];
 
 export interface ImageAttachment {
   name: string;
@@ -22,6 +31,7 @@ export interface ApprovalRequest {
 export type AgentEvent =
   | { type: "message.delta"; text: string }
   | { type: "message.done"; text: string }
+  | { type: "thinking.delta"; text: string }
   | { type: "tool.started"; id: string; tool: string; args: Record<string, unknown> }
   | { type: "tool.finished"; id: string; tool: string; ok: boolean; result: string }
   | { type: "approval.required"; approval: ApprovalRequest }
@@ -55,6 +65,7 @@ export type ClientMessage =
       images?: ImageAttachment[];
       mode?: AgentMode;
       toolPermissions?: Record<string, ToolPermission>;
+      thinkingEffort?: ThinkingEffort;
       autoApprove?: boolean;
     }
   | { type: "chat.cancel" }
@@ -80,6 +91,8 @@ export interface ProviderInfo {
 export interface ModelCapabilities {
   tools: boolean;
   vision: boolean;
+  /** Model accepts OpenAI-style reasoning_effort. */
+  thinking: boolean;
   notes: string[];
 }
 
@@ -90,6 +103,8 @@ export const KNOWN_TOOLS = [
   "write_file",
   "edit_file",
   "execute_command",
+  "web_search",
+  "fetch_url",
   "git_status",
   "git_diff",
   "git_log",

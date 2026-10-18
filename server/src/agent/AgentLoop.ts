@@ -1,5 +1,5 @@
 import type OpenAI from "openai";
-import type { AgentEvent, AgentMode, ImageAttachment, ProviderConfig, ToolPermission } from "../types.js";
+import type { AgentEvent, AgentMode, ImageAttachment, ProviderConfig, ThinkingEffort, ToolPermission } from "../types.js";
 import { createLLM } from "../llm/provider.js";
 import { getConfig } from "../config.js";
 import { buildSystemPrompt, buildAttachmentBlock, type ContextInput } from "./ContextBuilder.js";
@@ -25,6 +25,8 @@ export interface AgentRunOptions extends ContextInput {
   mode?: AgentMode;
   /** Per-tool permission overrides from the tools config dialog. */
   toolPermissions?: Record<string, ToolPermission>;
+  /** Reasoning effort for thinking-capable models (only sent if not off). */
+  thinkingEffort?: ThinkingEffort;
 }
 
 interface PendingToolCall {
@@ -71,6 +73,69 @@ const TOOL_NUDGE = [
 ].join(" ");
 
 /**
+ * Streaming splitter for inline <think>…</think> blocks (Qwen3 / DeepSeek-R1
+ * style). Reasoning text is routed to the thinking timeline instead of the
+ * message body. Handles tags split across stream chunks.
+ */
+interface ThinkSplitter {
+  phase: "start" | "think" | "content";
+  buf: string;
+}
+
+export function splitThinkChunk(
+  sp: ThinkSplitter,
+  chunk: string,
+): { thinking: string; content: string } {
+  if (sp.phase === "content") return { thinking: "", content: chunk };
+
+  if (sp.phase === "start") {
+    sp.buf += chunk;
+    const body = sp.buf.trimStart();
+    if (body.startsWith("<think>")) {
+      sp.phase = "think";
+      sp.buf = body.slice(7);
+      return splitThinkTail(sp); // process remainder after the opening tag
+    }
+    if (body.length < 7 && "<think>".startsWith(body)) {
+      // possibly an incomplete "<think>" prefix — wait for more chunks
+      return { thinking: "", content: "" };
+    }
+    sp.phase = "content";
+    const out = sp.buf;
+    sp.buf = "";
+    return { thinking: "", content: out };
+  }
+
+  // think phase
+  sp.buf += chunk;
+  return splitThinkTail(sp);
+}
+
+/** Process the pending think-phase buffer: emit thinking, watch for </think>. */
+function splitThinkTail(sp: ThinkSplitter): { thinking: string; content: string } {
+  const closeIdx = sp.buf.indexOf("</think>");
+  if (closeIdx !== -1) {
+    const thinking = sp.buf.slice(0, closeIdx);
+    const content = sp.buf.slice(closeIdx + 8);
+    sp.phase = "content";
+    sp.buf = "";
+    return { thinking, content };
+  }
+  // hold back up to 8 chars in case "</think>" is split across chunks
+  const hold = Math.min(8, sp.buf.length);
+  const thinking = sp.buf.slice(0, sp.buf.length - hold);
+  sp.buf = sp.buf.slice(sp.buf.length - hold);
+  return { thinking, content: "" };
+}
+
+export function flushThink(sp: ThinkSplitter): { thinking: string; content: string } {
+  const out = sp.buf;
+  sp.buf = "";
+  if (sp.phase === "think") return { thinking: out, content: "" };
+  return { thinking: "", content: out };
+}
+
+/**
  * The agent loop:
  *   stream → accumulate content + tool_calls → execute tools → append results
  *   → repeat until the model answers without tools or we hit maxIterations.
@@ -92,6 +157,8 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
 
   // Set once a 4xx shows the server/model can't handle the `tools` param.
   let nativeToolsUnsupported = false;
+  // Set once a 4xx shows the server rejects the reasoning_effort param.
+  let thinkingUnsupported = false;
   // One-time corrective re-prompt when the model gives instructions instead of
   // calling tools (e.g. "you can run: touch sample.txt").
   let nudged = false;
@@ -219,15 +286,25 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
       emit({ type: "agent.iteration", iteration });
 
       let stream: Awaited<ReturnType<typeof client.chat.completions.create>>;
+      const effort =
+        opts.thinkingEffort && opts.thinkingEffort !== "off" && !thinkingUnsupported
+          ? opts.thinkingEffort
+          : null;
       try {
-        stream = await client.chat.completions.create({
+        // reasoning_effort is not in the SDK's chat types for all models —
+        // pass it via a typed extension object while keeping the stream type.
+        const createParams = {
           model: opts.model,
           messages,
           // Some servers/models reject the tools param entirely — retry without.
           ...(useTools && !nativeToolsUnsupported ? { tools: openaiTools } : {}),
+          // Reasoning effort for thinking-capable models; other servers reject
+          // the unknown param — degrade once (see catch) and continue without.
+          ...(effort ? { reasoning_effort: effort } : {}),
           stream: true,
           // NOTE: no stream_options — many local OpenAI-compatible servers reject it.
-        });
+        } as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
+        stream = await client.chat.completions.create(createParams);
       } catch (err) {
         const status = (err as { status?: number }).status;
         const msg = (err as Error).message ?? "";
@@ -235,6 +312,12 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
           console.warn("[agent] server rejected tools param — falling back to text tool calls");
           nativeToolsUnsupported = true;
           iteration--; // retry this iteration without tools
+          continue;
+        }
+        if (effort && status === 400 && /reasoning|effort|thinking/i.test(msg)) {
+          console.warn("[agent] server rejected reasoning_effort — continuing without thinking mode");
+          thinkingUnsupported = true;
+          iteration--;
           continue;
         }
         if (/image|vision|multimodal/i.test(msg)) {
@@ -265,9 +348,11 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
       }
 
       let content = "";
+      let thinking = "";
       const pendingCalls = new Map<number, PendingToolCall>();
       let providerUsage: { prompt_tokens?: number; completion_tokens?: number } | null = null;
       const streamStart = Date.now();
+      const thinkSp: ThinkSplitter = { phase: "start", buf: "" };
 
       for await (const chunk of stream) {
         if (opts.signal.aborted) {
@@ -281,9 +366,27 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
         }
         const delta = chunk.choices?.[0]?.delta;
         if (!delta) continue;
+
+        // Separate reasoning fields (DeepSeek: reasoning_content, OpenRouter:
+        // reasoning, some others: thinking).
+        const d = delta as unknown as Record<string, unknown>;
+        const reasoningChunk = (d.reasoning_content ?? d.reasoning ?? d.thinking) as string | undefined;
+        if (reasoningChunk) {
+          thinking += reasoningChunk;
+          emit({ type: "thinking.delta", text: reasoningChunk });
+        }
+
         if (delta.content) {
-          content += delta.content;
-          emit({ type: "message.delta", text: delta.content });
+          // Route inline <think>…</think> blocks to the thinking timeline.
+          const parts = splitThinkChunk(thinkSp, delta.content);
+          if (parts.thinking) {
+            thinking += parts.thinking;
+            emit({ type: "thinking.delta", text: parts.thinking });
+          }
+          if (parts.content) {
+            content += parts.content;
+            emit({ type: "message.delta", text: parts.content });
+          }
         }
         if (delta.tool_calls) {
           for (const tc of delta.tool_calls) {
@@ -295,6 +398,17 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
             pendingCalls.set(idx, existing);
           }
         }
+      }
+
+      // Flush any buffered thinking (stream ended mid-think or with a held-back tail)
+      const flushed = flushThink(thinkSp);
+      if (flushed.thinking) {
+        thinking += flushed.thinking;
+        emit({ type: "thinking.delta", text: flushed.thinking });
+      }
+      if (flushed.content) {
+        content += flushed.content;
+        emit({ type: "message.delta", text: flushed.content });
       }
 
       // ---- Usage accounting for this request --------------------------------
@@ -310,6 +424,7 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
       }, 0);
       const outputChars =
         content.length +
+        thinking.length +
         [...pendingCalls.values()].reduce((n, c) => n + c.name.length + c.argsJson.length, 0);
       const inputTokens = providerUsage?.prompt_tokens ?? estimateTokens(promptChars);
       const outputTokens = providerUsage?.completion_tokens ?? estimateTokens(outputChars);

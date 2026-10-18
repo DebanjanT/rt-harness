@@ -22,6 +22,7 @@ export interface ApprovalRequest {
 export type AgentEvent =
   | { type: "message.delta"; text: string }
   | { type: "message.done"; text: string }
+  | { type: "thinking.delta"; text: string }
   | { type: "tool.started"; id: string; tool: string; args: Record<string, unknown> }
   | { type: "tool.finished"; id: string; tool: string; ok: boolean; result: string }
   | { type: "approval.required"; approval: ApprovalRequest }
@@ -52,6 +53,8 @@ export type AgentEvent =
 /** Messages sent by the client over the WebSocket. */
 export type AgentMode = "agent" | "ask" | "plan" | "bypass";
 export type ToolPermission = "auto" | "approval" | "disabled";
+/** Reasoning effort for thinking-capable models (provider-dependent). */
+export type ThinkingEffort = "off" | "low" | "medium" | "high" | "max";
 
 export interface ImageAttachment {
   name: string;
@@ -73,6 +76,8 @@ export type ClientMessage =
       mode?: AgentMode;
       /** Per-tool permission overrides from the tools config dialog. */
       toolPermissions?: Record<string, ToolPermission>;
+      /** Reasoning effort for thinking-capable models (sent only if supported). */
+      thinkingEffort?: ThinkingEffort;
       autoApprove?: boolean;
     }
   | { type: "chat.cancel" }
