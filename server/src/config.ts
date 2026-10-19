@@ -233,3 +233,50 @@ export function updateAgentSettings(
   console.log("[config] agent settings updated:", cfg.agent);
   return { ...cfg.agent };
 }
+
+/** Factory provider entries captured at module load — for the reset button. */
+const FACTORY_PROVIDERS: ProviderEntry[] = defaultConfig().providers;
+
+/**
+ * Update a provider (e.g. the user moved their Ollama/MLX server to a
+ * different port). Persisted to SQLite, so the harness keeps pulling the
+ * new URL from there across restarts.
+ */
+export function updateProvider(
+  id: string,
+  patch: { baseURL?: string; name?: string; apiKey?: string },
+): ProviderEntry {
+  const p = cfg.providers.find((x: ProviderEntry) => x.id === id);
+  if (!p) throw new Error(`provider not found: ${id}`);
+  if (patch.baseURL !== undefined) {
+    const url = patch.baseURL.trim().replace(/\/+$/, "");
+    if (!/^https?:\/\/.+/.test(url)) throw new Error("baseURL must be a valid http(s) URL");
+    p.baseURL = url;
+  }
+  if (patch.name !== undefined && patch.name.trim()) p.name = patch.name.trim().slice(0, 60);
+  if (patch.apiKey !== undefined && patch.apiKey.trim()) p.apiKey = patch.apiKey.trim();
+  p.models = []; // force re-discovery against the new URL
+  persist();
+  console.log(`[config] provider "${id}" updated → ${p.baseURL}`);
+  return p;
+}
+
+/**
+ * Restore a built-in provider's factory baseURL/env override. Returns null
+ * for custom providers (they have no factory default — delete instead).
+ */
+export function resetProvider(id: string): ProviderEntry | null {
+  const idx = cfg.providers.findIndex((x: ProviderEntry) => x.id === id);
+  if (idx === -1) throw new Error(`provider not found: ${id}`);
+  const factory = FACTORY_PROVIDERS.find((x) => x.id === id);
+  if (!factory) return null;
+  cfg.providers[idx] = { ...factory, models: [] };
+  persist();
+  console.log(`[config] provider "${id}" reset to factory URL ${factory.baseURL}`);
+  return cfg.providers[idx];
+}
+
+/** Factory baseURL for a provider id (null = custom provider, no default). */
+export function getFactoryBaseURL(id: string): string | null {
+  return FACTORY_PROVIDERS.find((x) => x.id === id)?.baseURL ?? null;
+}

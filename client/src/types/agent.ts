@@ -1,6 +1,6 @@
 /** Mirrors server/src/types.ts — the single source of truth for the WS protocol. */
 
-export type ToolCallApprovalKind = "command" | "file_write";
+export type ToolCallApprovalKind = "command" | "file_write" | "question";
 
 export type AgentMode = "agent" | "ask" | "plan" | "bypass";
 export type ToolPermission = "auto" | "approval" | "disabled";
@@ -26,6 +26,8 @@ export interface ApprovalRequest {
   summary: string;
   data: Record<string, unknown>;
   diff?: string;
+  /** For kind === "question": clickable answer choices. */
+  options?: string[];
 }
 
 export type AgentEvent =
@@ -37,6 +39,9 @@ export type AgentEvent =
   | { type: "approval.required"; approval: ApprovalRequest }
   | { type: "approval.resolved"; id: string; approved: boolean }
   | { type: "file.changed"; path: string }
+  | { type: "todos.updated"; todos: TodoItem[] }
+  | { type: "file.change"; change: FileChangeSummary }
+  | { type: "changes.cleared" }
   | { type: "agent.started"; providerId: string; model: string }
   | { type: "agent.iteration"; iteration: number }
   | {
@@ -69,7 +74,7 @@ export type ClientMessage =
       autoApprove?: boolean;
     }
   | { type: "chat.cancel" }
-  | { type: "chat.approve"; id: string; approved: boolean; always?: boolean }
+  | { type: "chat.approve"; id: string; approved: boolean; always?: boolean; option?: string }
   | { type: "terminal.input"; data: string }
   | { type: "terminal.resize"; cols: number; rows: number }
   | { type: "terminal.start" };
@@ -86,6 +91,24 @@ export interface ProviderInfo {
   name: string;
   baseURL: string;
   models: string[];
+  /** Factory URL for built-in providers (null/undefined for custom ones). */
+  factoryBaseURL?: string | null;
+}
+
+/** The agent's task list item (todo_write tool). */
+export interface TodoItem {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+/** One file mutation made by the agent this session. */
+export interface FileChangeSummary {
+  id: string;
+  path: string;
+  fromPath?: string;
+  kind: "created" | "modified" | "deleted" | "renamed";
+  added: number;
+  removed: number;
 }
 
 export interface ModelCapabilities {
@@ -103,6 +126,12 @@ export const KNOWN_TOOLS = [
   "write_file",
   "edit_file",
   "execute_command",
+  "todo_write",
+  "mkdir",
+  "delete_file",
+  "move_file",
+  "get_workspace_info",
+  "ask_user",
   "web_search",
   "fetch_url",
   "git_status",

@@ -5,7 +5,23 @@
  * model server directly, so providers are fully swappable.
  */
 
-export type ToolCallApprovalKind = "command" | "file_write";
+export type ToolCallApprovalKind = "command" | "file_write" | "question";
+
+/** The model's task list item (todo_write tool). */
+export interface TodoItem {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+/** UI-facing summary of one file mutation made by the agent. */
+export interface FileChangeSummary {
+  id: string;
+  path: string;
+  fromPath?: string;
+  kind: "created" | "modified" | "deleted" | "renamed";
+  added: number;
+  removed: number;
+}
 
 export interface ApprovalRequest {
   id: string;
@@ -28,6 +44,9 @@ export type AgentEvent =
   | { type: "approval.required"; approval: ApprovalRequest }
   | { type: "approval.resolved"; id: string; approved: boolean }
   | { type: "file.changed"; path: string }
+  | { type: "todos.updated"; todos: TodoItem[] }
+  | { type: "file.change"; change: FileChangeSummary }
+  | { type: "changes.cleared" }
   | { type: "agent.started"; providerId: string; model: string }
   | { type: "agent.iteration"; iteration: number }
   | {
@@ -81,7 +100,7 @@ export type ClientMessage =
       autoApprove?: boolean;
     }
   | { type: "chat.cancel" }
-  | { type: "chat.approve"; id: string; approved: boolean; always?: boolean }
+  | { type: "chat.approve"; id: string; approved: boolean; always?: boolean; option?: string }
   | { type: "terminal.input"; data: string }
   | { type: "terminal.resize"; cols: number; rows: number }
   | { type: "terminal.start" };

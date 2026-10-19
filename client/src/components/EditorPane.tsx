@@ -4,7 +4,7 @@ import { useEditorStore } from "../stores/editor";
 import { Button, Panel } from "./ui/primitives";
 
 /** True-black theme matching the harness surface palette (vs-dark is gray). */
-const RT_DARK = {
+export const RT_DARK = {
   base: "vs-dark" as const,
   inherit: true,
   rules: [

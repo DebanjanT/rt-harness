@@ -12,6 +12,17 @@ export interface ToolContext {
     data: Record<string, unknown>;
     diff?: string;
   }) => Promise<boolean>;
+  /**
+   * Ask the user a multiple-choice question (ask_user tool). Resolves with
+   * the chosen option text.
+   */
+  requestUserInput?: (req: {
+    tool: string;
+    question: string;
+    options: string[];
+  }) => Promise<string>;
+  /** Emit a protocol event to the client (todos.updated etc). */
+  emit?: (event: unknown) => void;
   /** AbortSignal tied to the current chat session. */
   signal: AbortSignal;
 }

@@ -3,14 +3,17 @@ import type {
   AgentEvent,
   AgentMode,
   ApprovalRequest,
+  FileChangeSummary,
   ImageAttachment,
   ModelCapabilities,
   ProviderInfo,
   ThinkingEffort,
+  TodoItem,
   ToolPermission,
 } from "../types/agent";
 import { harnessSocket } from "../lib/websocket";
 import { api } from "../lib/api";
+import { useEditorStore } from "./editor";
 
 export interface ToolStep {
   id: string;
@@ -87,6 +90,10 @@ interface ChatState {
   usage: UsageStats | null;
   /** Entry indexes whose plan was already approved & handed to the agent. */
   approvedPlanIds: string[];
+  /** The agent's live task checklist (todo_write tool). */
+  todos: TodoItem[];
+  /** Files the agent changed this session (diff/undo surface). */
+  changes: FileChangeSummary[];
   input: string;
   loaded: boolean;
 
@@ -103,10 +110,14 @@ interface ChatState {
   removeImage: (index: number) => void;
   addProvider: (name: string, baseURL: string, apiKey: string) => Promise<void>;
   removeProvider: (id: string) => Promise<void>;
+  /** Re-fetch providers from the server (after editing an endpoint URL). */
+  refreshProviders: () => Promise<void>;
   send: (text: string) => Promise<void>;
   markPlanApproved: (id: string) => void;
   cancel: () => void;
-  resolveApproval: (id: string, approved: boolean) => void;
+  resolveApproval: (id: string, approved: boolean, option?: string) => void;
+  undoAllChanges: () => Promise<void>;
+  keepChanges: () => Promise<void>;
   handleEvent: (event: AgentEvent) => void;
 }
 
@@ -185,6 +196,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   capabilitiesLoading: false,
   usage: null,
   approvedPlanIds: [],
+  todos: [],
+  changes: [],
   input: "",
   loaded: false,
 
@@ -203,6 +216,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       console.error("provider load failed:", err);
       set({ loaded: true });
     }
+    // Restore run state (survives client reloads while server stays up).
+    api.getTodos().then((r) => set({ todos: r.todos })).catch(() => {});
+    api.getChanges().then((r) => set({ changes: r.changes })).catch(() => {});
   },
 
   setInput: (v) => set({ input: v }),
@@ -270,6 +286,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 
+  refreshProviders: async () => {
+    try {
+      const { providers } = await api.getProviders();
+      set((s) => {
+        // Keep the current selection; refresh its model list.
+        const cur = providers.find((p) => p.id === s.providerId);
+        return {
+          providers,
+          ...(cur && !cur.models.includes(s.model) ? { model: cur.models[0] ?? "" } : {}),
+        };
+      });
+    } catch (err) {
+      console.error("provider refresh failed:", err);
+    }
+  },
+
   send: async (text) => {
     const { providerId, model, autoApprove, mode, toolPermissions, pinnedPaths, images, thinkingEffort } = get();
     if ((!text.trim() && images.length === 0) || !model) return;
@@ -321,8 +353,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
   cancel: () => harnessSocket.send({ type: "chat.cancel" }),
   markPlanApproved: (id: string) =>
     set((s) => ({ approvedPlanIds: [...s.approvedPlanIds, id] })),
-  resolveApproval: (id, approved) => {
-    harnessSocket.send({ type: "chat.approve", id, approved });
+
+  undoAllChanges: async () => {
+    try {
+      const r = await api.undoChanges();
+      set({ changes: [] });
+      // Reload touched files in the editor if open.
+      for (const p of r.touched) {
+        useEditorStore.getState().reloadIfOpen(p).catch(() => {});
+      }
+    } catch (err) {
+      console.error("undo failed:", err);
+    }
+  },
+
+  keepChanges: async () => {
+    try {
+      await api.keepChanges();
+      set({ changes: [] });
+    } catch (err) {
+      console.error("keep failed:", err);
+    }
+  },
+  resolveApproval: (id, approved, option) => {
+    harnessSocket.send(option ? { type: "chat.approve", id, approved: true, option } : { type: "chat.approve", id, approved });
     // Optimistic UI update; the server echoes approval.resolved too.
     set((s) => ({
       entries: s.entries.map((en) =>
@@ -490,6 +544,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
             error: event.error,
           })),
         }));
+        break;
+
+      case "todos.updated":
+        set({ todos: event.todos });
+        break;
+
+      case "file.change":
+        set((s) => {
+          // Latest change per path wins — the UI shows the net effect per file.
+          const rest = s.changes.filter((c) => c.path !== event.change.path);
+          return { changes: [...rest, event.change] };
+        });
+        useEditorStore.getState().reloadIfOpen(event.change.path).catch(() => {});
+        break;
+
+      case "changes.cleared":
+        set({ changes: [] });
         break;
 
       default:

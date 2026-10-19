@@ -33,6 +33,26 @@ OpenAI-compatible model servers (Ollama, FreeToken, LM Studio, vLLM, …).
 
 ## Quick start
 
+**One command** — the setup script checks/installs everything (Node.js 20+, npm
+dependencies for all three packages, native module rebuilds, verification
+build) and offers to start the app:
+
+```bash
+./setup.sh          # Linux / macOS
+setup.bat           # Windows (double-click works too)
+```
+
+Both scripts support `--no-run` to install without starting. They will:
+
+1. Install Node.js 20+ if missing (NodeSource/apt/dnf/pacman/brew/winget/choco/MSI)
+2. Install build tools on Linux if native modules need compiling
+3. `npm install` in the root, `server/`, and `client/`
+4. Verify better-sqlite3 + node-pty load (rebuild from source if not)
+5. Run a verification build of server + client
+6. Offer to `npm run dev` right away
+
+Prefer manual setup?
+
 ```bash
 # 1. install everything
 npm install && npm install --prefix server && npm install --prefix client

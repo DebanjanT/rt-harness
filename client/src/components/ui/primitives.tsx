@@ -255,17 +255,18 @@ export function DialogContent({
       <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm
         [animation:fadeIn_150ms_ease-out]" />
       <DialogPrimitive.Content
-        className={`fixed left-1/2 top-1/2 z-50 w-[420px] max-w-[92vw] -translate-x-1/2 -translate-y-1/2
-          rounded-xl border border-line-strong bg-surface-2 p-4 shadow-2xl shadow-black/70
+        className={`fixed left-1/2 top-1/2 z-50 flex max-h-[88vh] w-[420px] max-w-[92vw]
+          -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-xl
+          border border-line-strong bg-surface-2 p-4 shadow-2xl shadow-black/70
           outline-none [animation:popIn_150ms_ease-out] ${className}`}
       >
-        <DialogPrimitive.Title className="text-sm font-semibold text-zinc-100">{title}</DialogPrimitive.Title>
+        <DialogPrimitive.Title className="shrink-0 pr-6 text-sm font-semibold text-zinc-100">{title}</DialogPrimitive.Title>
         {description && (
-          <DialogPrimitive.Description className="mt-1 text-xs leading-relaxed text-ink-3">
+          <DialogPrimitive.Description className="mt-1 shrink-0 text-xs leading-relaxed text-ink-3">
             {description}
           </DialogPrimitive.Description>
         )}
-        <div className="mt-4">{children}</div>
+        <div className="mt-4 min-h-0 flex-1 overflow-y-auto pr-0.5">{children}</div>
         <DialogPrimitive.Close asChild>
           <button
             className="absolute right-3 top-3 rounded-md p-1 text-ink-3 transition-colors

@@ -40,6 +40,12 @@ export async function buildSystemPrompt(input: ContextInput, mode: AgentMode = "
         "- web_search(query, max_results?) — search the web for current information",
         "- fetch_url(url, max_chars?) — read a web page as text",
         "- git_status() / git_diff(path?) / git_log(count?) — inspect git state",
+        "- mkdir(path) — create a directory (parents auto-created)",
+        "- delete_file(path) — delete a file or directory (user approves)",
+        "- move_file(from, to) — move/rename a file or directory (user approves)",
+        "- get_workspace_info() — workspace root, platform, file counts",
+        "- ask_user(question, options) — ask the user a multiple-choice question when genuinely blocked or ambiguous; use sparingly",
+        "- todo_write(todos) — maintain your task checklist (see rule 7)",
       ].join("\n")
     : "(tools are disabled in this mode)";
 
@@ -86,7 +92,12 @@ ${knownToolHints}
    tools when the user's message actually asks you to inspect, create, or change
    something in the workspace.
 7. If the request is ambiguous, make a reasonable assumption, state it, and proceed.
-8. Context: user pinned files = ${attachmentNames}. CWD is the workspace root.
+8. TODO LIST: for any task with 2+ steps, IMMEDIATELY call todo_write with all
+   planned steps (status "pending"). Before starting a step, set it to
+   "in_progress" (only ONE at a time); the moment it is done, mark it
+   "completed" and move to the next. Keep the list accurate — the user watches
+   it live. Skip todo_write only for trivial one-step requests.
+9. Context: user pinned files = ${attachmentNames}. CWD is the workspace root.
    Platform: ${os.platform()}.
 9. ${MODE_INSTRUCTIONS[mode]}
 

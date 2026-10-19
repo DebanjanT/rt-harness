@@ -1,4 +1,10 @@
-import type { FileNode, ProviderInfo, ModelCapabilities } from "../types/agent";
+import type {
+  FileNode,
+  ProviderInfo,
+  ModelCapabilities,
+  TodoItem,
+  FileChangeSummary,
+} from "../types/agent";
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -104,4 +110,36 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ agent }),
     }).then((r) => json<{ ok: boolean; agent: Record<string, number>; defaults: Record<string, number> }>(r)),
+
+  // -- provider endpoint editing (e.g. changed local port) --
+
+  updateProvider: (id: string, patch: { baseURL?: string; name?: string; apiKey?: string }) =>
+    fetch(`/api/providers/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }).then((r) => json<{ ok: boolean; provider: ProviderInfo }>(r)),
+
+  resetProvider: (id: string) =>
+    fetch(`/api/providers/${encodeURIComponent(id)}/reset`, { method: "POST" }).then((r) =>
+      json<{ ok: boolean; provider: ProviderInfo }>(r),
+    ),
+
+  // -- agent run state: todos + file changes --
+
+  getTodos: () => fetch("/api/todos").then((r) => json<{ todos: TodoItem[] }>(r)),
+
+  getChanges: () => fetch("/api/changes").then((r) => json<{ changes: FileChangeSummary[] }>(r)),
+
+  /** Before/after content for the Monaco diff view. */
+  getChangeDiff: (id: string) =>
+    fetch(`/api/changes/${encodeURIComponent(id)}/diff`).then((r) =>
+      json<{ path: string; kind: string; before: string | null; after: string | null }>(r),
+    ),
+
+  undoChanges: () =>
+    fetch("/api/changes/undo", { method: "POST" }).then((r) => json<{ ok: boolean; touched: string[] }>(r)),
+
+  keepChanges: () =>
+    fetch("/api/changes/keep", { method: "POST" }).then((r) => json<{ ok: boolean }>(r)),
 };

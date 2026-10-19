@@ -70,36 +70,41 @@ export function SettingsDialog({
         description="Stored in SQLite (data/harness.db) — persists across restarts. Each setting can be reset to its factory default."
         className="w-[460px]"
       >
-        <div className="space-y-3">
+        <div className="space-y-1.5">
           {ORDER.map((key) => {
             const meta = LABELS[key] ?? { label: key, hint: "" };
             const isDefault = values[key] === defaults[key];
             return (
-              <div key={key} className="flex items-center gap-2">
+              <div
+                key={key}
+                className="flex items-center gap-3 rounded-lg border border-line bg-surface-0/60 px-3 py-2"
+              >
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5">
-                    <span className="text-xs font-medium text-zinc-200">{meta.label}</span>
+                    <span className="truncate text-xs font-medium text-zinc-200">{meta.label}</span>
                     {!isDefault && <Badge tone="amber">modified</Badge>}
                   </div>
-                  <div className="text-[10px] text-ink-3">{meta.hint}</div>
+                  <div className="mt-0.5 text-[10px] leading-snug text-ink-3">{meta.hint}</div>
                 </div>
-                <input
-                  type="number"
-                  value={values[key] ?? ""}
-                  onChange={(e) => setValue(key, Number(e.target.value))}
-                  className={`${inputClasses} w-24 text-right font-mono`}
-                />
-                <Tooltip content="Reset to default">
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    disabled={isDefault}
-                    onClick={() => setValue(key, defaults[key])}
-                    title="Reset to default"
-                  >
-                    ↺
-                  </Button>
-                </Tooltip>
+                <div className="flex shrink-0 items-center gap-1">
+                  <input
+                    type="number"
+                    value={values[key] ?? ""}
+                    onChange={(e) => setValue(key, Number(e.target.value))}
+                    className={`${inputClasses} w-24 text-right font-mono`}
+                  />
+                  <Tooltip content="Reset to default">
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      disabled={isDefault}
+                      onClick={() => setValue(key, defaults[key])}
+                      title="Reset to default"
+                    >
+                      ↺
+                    </Button>
+                  </Tooltip>
+                </div>
               </div>
             );
           })}
@@ -110,7 +115,7 @@ export function SettingsDialog({
             text-[11px] text-red-400">{error}</div>
         )}
 
-        <div className="mt-4 flex justify-end gap-2">
+        <div className="mt-4 flex shrink-0 justify-end gap-2">
           <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button variant="solid" size="sm" disabled={!dirty || busy} onClick={() => void save()}>
             {busy ? "Saving…" : "Save settings"}

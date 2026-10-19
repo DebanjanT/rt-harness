@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { useChatStore } from "../stores/chat";
+import { api } from "../lib/api";
 import {
   Dropdown, DropdownTrigger, DropdownContent, DropdownItem, DropdownLabel,
   Dialog, DialogTrigger, DialogContent, Field, inputClasses, Button, Tooltip,
 } from "./ui/primitives";
+import type { ProviderInfo } from "../types/agent";
 
 function ChevronDown() {
   return (
@@ -65,12 +67,86 @@ function AddProviderForm({ onDone }: { onDone: () => void }) {
 }
 
 /**
+ * Edit a provider's endpoint (e.g. the local server moved to a different
+ * port). Persisted to SQLite; built-in providers can also be reset to their
+ * factory URL.
+ */
+function EditProviderForm({ provider, onDone }: { provider: ProviderInfo; onDone: () => void }) {
+  const refreshProviders = useChatStore((s) => s.refreshProviders);
+  const [baseURL, setBaseURL] = useState(provider.baseURL);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const hasDefault = Boolean(provider.factoryBaseURL);
+  const isDefaultURL = provider.factoryBaseURL != null && baseURL === provider.factoryBaseURL;
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.updateProvider(provider.id, { baseURL: baseURL.trim() });
+      await refreshProviders();
+      onDone();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reset = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.resetProvider(provider.id);
+      await refreshProviders();
+      onDone();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <Field label={`Base URL for "${provider.name}"`}>
+        <input className={`${inputClasses} font-mono`} placeholder="http://127.0.0.1:11434/v1"
+          value={baseURL} onChange={(e) => setBaseURL(e.target.value)} />
+      </Field>
+      {hasDefault && (
+        <div className="mb-3 text-[10px] text-ink-3">
+          Factory default: <span className="font-mono">{provider.factoryBaseURL}</span>
+        </div>
+      )}
+      {error && (
+        <div className="mb-3 rounded-md border border-red-900/60 bg-red-950/30 px-2.5 py-2
+          text-[11px] leading-relaxed text-red-400">{error}</div>
+      )}
+      <div className="flex items-center justify-between gap-2">
+        {hasDefault ? (
+          <Button variant="ghost" size="sm" disabled={busy || isDefaultURL} onClick={() => void reset()} title="Restore the factory URL">
+            ↺ Reset
+          </Button>
+        ) : <span />}
+        <span className="flex gap-2">
+          <Button variant="ghost" size="sm" onClick={onDone}>Cancel</Button>
+          <Button variant="solid" size="sm" disabled={busy || !baseURL.trim() || baseURL.trim() === provider.baseURL} onClick={() => void save()}>
+            {busy ? "Verifying…" : "Save"}
+          </Button>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/**
  * Single model switcher dropdown: models grouped by provider, plus
  * add/remove custom endpoints.
  */
 export function ModelSwitcher() {
   const { providers, providerId, model, setProvider, setModel, removeProvider } = useChatStore();
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [editing, setEditing] = useState<ProviderInfo | null>(null);
   const current = providers.find((p) => p.id === providerId);
 
   return (
@@ -94,19 +170,32 @@ export function ModelSwitcher() {
                 <DropdownLabel>
                   <span className="flex items-center justify-between">
                     <span className="truncate">{p.name}</span>
-                    {p.id.startsWith("custom_") && (
-                      <Tooltip content="Remove this endpoint">
+                    <span className="flex shrink-0 items-center gap-0.5">
+                      <Tooltip content="Change endpoint URL / port">
                         <button
-                          className="rounded px-1 text-[10px] text-ink-3 hover:text-red-400"
+                          className="rounded px-1 text-[10px] text-ink-3 hover:text-sky-400"
                           onClick={(e) => {
                             e.stopPropagation();
-                            void removeProvider(p.id);
+                            setEditing(p);
                           }}
                         >
-                          remove
+                          edit
                         </button>
                       </Tooltip>
-                    )}
+                      {p.id.startsWith("custom_") && (
+                        <Tooltip content="Remove this endpoint">
+                          <button
+                            className="rounded px-1 text-[10px] text-ink-3 hover:text-red-400"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void removeProvider(p.id);
+                            }}
+                          >
+                            remove
+                          </button>
+                        </Tooltip>
+                      )}
+                    </span>
                   </span>
                 </DropdownLabel>
                 {p.models.map((m) => (
@@ -145,6 +234,15 @@ export function ModelSwitcher() {
       >
         <AddProviderForm onDone={() => setDialogOpen(false)} />
       </DialogContent>
+
+      <Dialog open={Boolean(editing)} onOpenChange={(v) => !v && setEditing(null)}>
+        <DialogContent
+          title="Edit endpoint"
+          description="Saved to SQLite (data/harness.db) — the harness keeps using the new URL across restarts."
+        >
+          {editing && <EditProviderForm provider={editing} onDone={() => setEditing(null)} />}
+        </DialogContent>
+      </Dialog>
     </Dialog>
   );
 }

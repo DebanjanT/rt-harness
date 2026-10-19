@@ -15,7 +15,7 @@ import fs from "node:fs/promises";
  */
 export class AgentSession {
   private history: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
-  private pendingApprovals = new Map<string, (approved: boolean) => void>();
+  private pendingApprovals = new Map<string, (result: boolean | string) => void>();
   private currentRun: AbortController | null = null;
 
   constructor(private ws: WebSocket) {}
@@ -38,7 +38,13 @@ export class AgentSession {
         const resolver = this.pendingApprovals.get(msg.id);
         if (resolver) {
           this.pendingApprovals.delete(msg.id);
-          resolver(msg.approved);
+          // Question approvals carry the chosen option; plain approvals resolve true/false.
+          const chosen = (msg as { option?: string }).option;
+          if (typeof chosen === "string") {
+            (resolver as (v: boolean | string) => void)(chosen);
+          } else {
+            (resolver as (v: boolean | string) => void)(msg.approved);
+          }
           this.send({ type: "approval.resolved", id: msg.id, approved: msg.approved });
         }
         break;
@@ -81,6 +87,7 @@ export class AgentSession {
         signal: controller.signal,
         onFileChanged: (path) => this.send({ type: "file.changed", path }),
         requestApproval: (req) => this.requestApproval(req),
+        requestUserInput: (req) => this.requestUserInput(req),
       },
       (event) => this.send(event),
     );
@@ -102,7 +109,7 @@ export class AgentSession {
     return new Promise((resolve) => {
       const id = crypto.randomUUID();
       const approval: ApprovalRequest = { id, ...req };
-      this.pendingApprovals.set(id, resolve);
+      this.pendingApprovals.set(id, resolve as (v: boolean | string) => void);
       this.send({ type: "approval.required", approval });
       // If the user never answers and the run is cancelled, unblock.
       const check = setInterval(() => {
@@ -114,6 +121,40 @@ export class AgentSession {
       // Safety valve: never wait more than 5 minutes.
       setTimeout(() => {
         if (this.pendingApprovals.delete(id)) resolve(false);
+        clearInterval(check);
+      }, 300_000);
+    });
+  }
+
+  /**
+   * ask_user support: sends a question card with clickable option buttons to
+   * the client and resolves with the chosen option string (or a cancellation
+   * marker if the user denies / never answers).
+   */
+  private requestUserInput(req: {
+    tool: string;
+    question: string;
+    options: string[];
+  }): Promise<string> {
+    return new Promise((resolve) => {
+      const id = crypto.randomUUID();
+      const approval: ApprovalRequest = {
+        id,
+        kind: "question",
+        tool: req.tool,
+        summary: req.question,
+        data: { options: req.options },
+      };
+      this.pendingApprovals.set(id, resolve as (v: boolean | string) => void);
+      this.send({ type: "approval.required", approval });
+      const check = setInterval(() => {
+        if (!this.pendingApprovals.has(id)) {
+          clearInterval(check);
+          resolve("__cancelled__");
+        }
+      }, 500);
+      setTimeout(() => {
+        if (this.pendingApprovals.delete(id)) resolve("__cancelled__");
         clearInterval(check);
       }, 300_000);
     });

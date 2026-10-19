@@ -5,6 +5,9 @@ import { ToolCallCard } from "./ToolCallCard";
 import { ApprovalCard } from "./ApprovalCard";
 import { PlanApprovalCard } from "./PlanApprovalCard";
 import { Composer } from "./Composer";
+import { TodoPanel } from "./TodoPanel";
+import { FileChangesPanel } from "./FileChangesPanel";
+import { DiffDialog } from "./DiffDialog";
 import { Markdown } from "./Markdown";
 import { Panel, PanelHeader, Badge } from "./ui/primitives";
 import type { AgentMode } from "../types/agent";
@@ -211,6 +214,7 @@ export function ChatPanel() {
   const chat = useChatStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
+  const [diffId, setDiffId] = useState<string | null>(null);
 
   const scrollToBottom = useCallback((smooth = false) => {
     const el = scrollRef.current;
@@ -278,10 +282,16 @@ export function ChatPanel() {
         )}
       </div>
 
+      {/* Agent's live todo checklist + tracked file changes (Keep/Undo) */}
+      <TodoPanel />
+      <FileChangesPanel onOpenDiff={setDiffId} />
+
       {/* Composer is the last flex child — always pinned to the bottom. */}
       <div className="shrink-0">
         <Composer />
       </div>
+
+      <DiffDialog changeId={diffId} onClose={() => setDiffId(null)} />
     </Panel>
   );
 }

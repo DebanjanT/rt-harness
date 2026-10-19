@@ -18,6 +18,8 @@ export interface AgentRunOptions extends ContextInput {
   autoApprove: boolean;
   signal: AbortSignal;
   requestApproval: ToolContext["requestApproval"];
+  /** ask_user tool: forwards a question + options to the client, resolves with the chosen answer. */
+  requestUserInput: NonNullable<ToolContext["requestUserInput"]>;
   onFileChanged: (path: string) => void;
   /** Images uploaded from the composer (sent as image_url content parts). */
   images?: ImageAttachment[];
@@ -63,6 +65,21 @@ export function looksLikeInstructionText(text: string): boolean {
  */
 const PURE_GREETING_RE =
   /^\s*(?:hi+|hey+|hello+|yo+|sup|hiya|howdy|greetings|good\s*(?:morning|afternoon|evening)|thanks?|thank\s*you|ty|ok(?:ay)?|cool|nice|who\s+are\s+you|what\s+are\s+you|what\s+can\s+you\s+do|can\s+you\s+help(?:\s+me)?|are\s+you\s+there)[\s!.,?]*$/i;
+
+/** Workspace-relative paths a tool MAY mutate (for change tracking). */
+function mutationPaths(toolName: string, args: Record<string, unknown>): string[] {
+  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  switch (toolName) {
+    case "write_file":
+    case "edit_file":
+    case "delete_file":
+      return [str(args.path)].filter((p): p is string => Boolean(p));
+    case "move_file":
+      return [str(args.from), str(args.to)].filter((p): p is string => Boolean(p));
+    default:
+      return [];
+  }
+}
 
 const TOOL_NUDGE = [
   "You replied with instructions telling ME how to do the task — that is wrong.",
@@ -244,10 +261,27 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
 
     emit({ type: "tool.started", id: callId, tool: tool.name, args });
 
+    // ---- File-change tracking --------------------------------------------
+    // Snapshot every path the tool MAY mutate before execution, compare after,
+    // and record a change entry so the UI can show diffs and undo. Works for
+    // all fs tools generically (including execute_command — no path tracking
+    // there, but write/edit/delete/move cover the model's mutation surface).
+    const snapshotPaths = mutationPaths(tool.name, args);
+    const before = new Map<string, string | null>();
+    if (snapshotPaths.length) {
+      const { resolveInWorkspace } = await import("../workspace/FileSystem.js");
+      const { readIfExists } = await import("./RunState.js");
+      for (const p of snapshotPaths) {
+        before.set(p, await readIfExists(resolveInWorkspace(p)));
+      }
+    }
+
     const ctx: ToolContext = {
       autoApprove: effectiveAutoApprove || override === "auto",
       signal: opts.signal,
       onFileChanged: opts.onFileChanged,
+      requestUserInput: (req) => opts.requestUserInput(req),
+      emit: (event) => emit(event as AgentEvent),
       requestApproval: async (req) => {
         let diff = req.diff;
         if (
@@ -278,6 +312,58 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
       if ((err as Error).name === "AbortError") throw err;
       result = `Tool error: ${(err as Error).message}`;
       ok = false;
+    }
+
+    // ---- Record file changes (after successful mutating tools) ------------
+    if (ok && snapshotPaths.length) {
+      const { resolveInWorkspace } = await import("../workspace/FileSystem.js");
+      const { recordFileChange, readIfExists } = await import("./RunState.js");
+
+      // Renames: from vanished + to appeared → record as one "renamed" change.
+      if (tool.name === "move_file" && snapshotPaths.length === 2) {
+        const [fromP, toP] = snapshotPaths;
+        const fromBefore = before.get(fromP) ?? null;
+        const fromAfter = await readIfExists(resolveInWorkspace(fromP));
+        const toBefore = before.get(toP) ?? null;
+        const toAfter = await readIfExists(resolveInWorkspace(toP));
+        if (fromBefore !== null && fromAfter === null && toAfter !== null) {
+          const change = recordFileChange({
+            path: toP, fromPath: fromP, kind: "renamed", before: fromBefore, after: toAfter,
+          });
+          if (change) {
+            emit({
+              type: "file.change",
+              change: { id: change.id, path: change.path, fromPath: change.fromPath, kind: change.kind, added: change.added, removed: change.removed },
+            });
+          }
+        } else {
+          for (const p of snapshotPaths) {
+            const bc = before.get(p) ?? null;
+            const ac = await readIfExists(resolveInWorkspace(p));
+            if (bc === ac) continue;
+            const kind: "created" | "modified" | "deleted" = bc === null ? "created" : ac === null ? "deleted" : "modified";
+            const change = recordFileChange({ path: p, kind, before: bc, after: ac });
+            if (change) {
+              emit({ type: "file.change", change: { id: change.id, path: change.path, kind: change.kind, added: change.added, removed: change.removed } });
+            }
+          }
+        }
+      } else {
+        for (const p of snapshotPaths) {
+          const beforeContent = before.get(p) ?? null;
+          const afterContent = await readIfExists(resolveInWorkspace(p));
+          if (beforeContent === afterContent) continue;
+          const kind: "created" | "modified" | "deleted" =
+            beforeContent === null ? "created" : afterContent === null ? "deleted" : "modified";
+          const change = recordFileChange({ path: p, kind, before: beforeContent, after: afterContent });
+          if (change) {
+            emit({
+              type: "file.change",
+              change: { id: change.id, path: change.path, kind: change.kind, added: change.added, removed: change.removed },
+            });
+          }
+        }
+      }
     }
 
     emit({ type: "tool.finished", id: callId, tool: tool.name, ok, result: result.slice(0, 4000) });
@@ -533,20 +619,63 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
       }
 
       // ---- Execute ----------------------------------------------------------
+      // PARALLEL strategy: auto-permission tools run concurrently (Promise.all
+      // — e.g. several read_file calls resolve together); approval-gated tools
+      // run sequentially so their Allow/Deny cards queue predictably in the UI.
       if (nativeMode) {
-        for (const call of pendingCalls.values()) {
+        const calls = [...pendingCalls.values()];
+        const results = new Map<string, string>();
+
+        const parseArgs = (call: PendingToolCall) => {
+          try {
+            return call.argsJson ? (JSON.parse(call.argsJson) as Record<string, unknown>) : {};
+          } catch {
+            return null;
+          }
+        };
+
+        const isAuto = (name: string) => {
+          const t = toolByName.get(name);
+          const override = opts.toolPermissions?.[name];
+          if (override) return override === "auto";
+          return t?.permission === "auto";
+        };
+
+        // Phase 1: all auto tools in parallel.
+        const autoCalls = calls.filter((c) => isAuto(c.name));
+        await Promise.all(
+          autoCalls.map(async (call) => {
+            const callId = call.id || `call_${iteration}_${call.name}`;
+            const args = parseArgs(call) ?? {};
+            const result = await executeToolCall(callId, call.name, args);
+            results.set(callId, result);
+          }),
+        );
+
+        // Phase 2: approval-gated tools sequentially (keeps approval cards ordered).
+        const gatedCalls = calls.filter((c) => !isAuto(c.name));
+        for (const call of gatedCalls) {
           if (opts.signal.aborted) throw new DOMException("Aborted by user", "AbortError");
           const callId = call.id || `call_${iteration}_${call.name}`;
-          let args: Record<string, unknown> = {};
-          try {
-            args = call.argsJson ? (JSON.parse(call.argsJson) as Record<string, unknown>) : {};
-          } catch {
+          const args = parseArgs(call);
+          if (args === null) {
             const msg = `Error: tool arguments were not valid JSON: ${call.argsJson.slice(0, 500)}`;
             messages.push({ role: "tool", tool_call_id: callId, content: msg });
             continue;
           }
           const result = await executeToolCall(callId, call.name, args);
-          messages.push({ role: "tool", tool_call_id: callId, content: result });
+          results.set(callId, result);
+        }
+
+        // Append tool results in the ORIGINAL request order (some servers care).
+        for (const call of calls) {
+          const callId = call.id || `call_${iteration}_${call.name}`;
+          const args = parseArgs(call);
+          const content2 =
+            args === null
+              ? `Error: tool arguments were not valid JSON: ${call.argsJson.slice(0, 500)}`
+              : (results.get(callId) ?? "");
+          messages.push({ role: "tool", tool_call_id: callId, content: content2 });
         }
       } else {
         // TEXT mode: no tool_call ids exist, so results go back as a user-role

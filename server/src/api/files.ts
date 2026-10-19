@@ -4,7 +4,8 @@ import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { getConfig, addProvider, removeProvider, setWorkspaceRoot, updateAgentSettings, AGENT_DEFAULTS } from "../config.js";
+import { getConfig, addProvider, removeProvider, setWorkspaceRoot, updateAgentSettings, updateProvider, resetProvider, getFactoryBaseURL, AGENT_DEFAULTS } from "../config.js";
+import { ChangeStore, TodoStore } from "../agent/RunState.js";
 import { getTree, resolveInWorkspace, pathExists } from "../workspace/FileSystem.js";
 import { isBinaryPath, looksBinary } from "../security/PathPolicy.js";
 import { listModels, createLLM } from "../llm/provider.js";
@@ -95,9 +96,39 @@ api.get("/providers", async (_req, res) => {
       name: p.name,
       baseURL: p.baseURL,
       models: await listModels(p),
+      // null for custom providers (no factory default to reset to)
+      factoryBaseURL: getFactoryBaseURL(p.id),
     })),
   );
   res.json({ providers, workspaceRoot: cfg.workspaceRoot });
+});
+
+/** PATCH /api/providers/:id { baseURL?, name?, apiKey? } — e.g. port changed. */
+api.patch("/providers/:id", async (req, res) => {
+  try {
+    const { baseURL, name, apiKey } = req.body as { baseURL?: string; name?: string; apiKey?: string };
+    if (!baseURL && !name && !apiKey) {
+      return res.status(400).json({ error: "nothing to update — send baseURL, name or apiKey" });
+    }
+    const provider = updateProvider(req.params.id, { baseURL, name, apiKey });
+    // Re-discover models against the new URL immediately so the UI can show them.
+    const models = await listModels(provider);
+    return res.json({ ok: true, provider: { ...provider, models } });
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+/** POST /api/providers/:id/reset — restore the factory baseURL (built-ins only). */
+api.post("/providers/:id/reset", async (req, res) => {
+  try {
+    const provider = resetProvider(req.params.id);
+    if (!provider) return res.status(409).json({ error: "custom endpoints have no factory default — remove them instead" });
+    const models = await listModels(provider);
+    res.json({ ok: true, provider: { ...provider, models } });
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
 });
 
 /** POST /api/providers — add a custom/cloud OpenAI-compatible endpoint. */
@@ -289,6 +320,43 @@ api.post("/settings", (req, res) => {
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Agent run state: todos + tracked file changes (diffs / undo / keep)
+// ---------------------------------------------------------------------------
+
+/** GET /api/todos — the model's current todo list. */
+api.get("/todos", (_req, res) => {
+  res.json({ todos: TodoStore.get() });
+});
+
+/** GET /api/changes — summaries of the agent's file changes this session. */
+api.get("/changes", (_req, res) => {
+  res.json({ changes: ChangeStore.list() });
+});
+
+/** GET /api/changes/:id/diff — before/after content for the Monaco diff view. */
+api.get("/changes/:id/diff", (req, res) => {
+  const change = ChangeStore.get(req.params.id);
+  if (!change) return res.status(404).json({ error: "change not found" });
+  res.json({ path: change.path, kind: change.kind, before: change.before, after: change.after });
+});
+
+/** POST /api/changes/undo — revert ALL tracked changes (newest first). */
+api.post("/changes/undo", async (_req, res) => {
+  try {
+    const touched = await ChangeStore.undoAll();
+    res.json({ ok: true, touched });
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+/** POST /api/changes/keep — accept the changes (clears tracking). */
+api.post("/changes/keep", (_req, res) => {
+  ChangeStore.clear();
+  res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------
