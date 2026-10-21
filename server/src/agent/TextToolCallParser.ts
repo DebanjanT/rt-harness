@@ -161,7 +161,7 @@ function normalizeObject(obj: unknown): ParsedToolCall | null {
 export function normalizeToolArgs(args: Record<string, unknown>): Record<string, unknown> {
   const out = { ...args };
   if (!out.path) {
-    for (const alt of ["file", "filename", "file_path", "file_name", "target"]) {
+    for (const alt of ["file", "filename", "file_path", "file_name", "filepath", "target"]) {
       if (typeof out[alt] === "string" && out[alt]) {
         out.path = out[alt];
         delete out[alt];

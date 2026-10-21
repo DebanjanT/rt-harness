@@ -40,6 +40,7 @@ export type AgentEvent =
   | { type: "message.done"; text: string }
   | { type: "thinking.delta"; text: string }
   | { type: "tool.started"; id: string; tool: string; args: Record<string, unknown> }
+  | { type: "tool.progress"; tool: string; chars: number; path?: string; preview?: string }
   | { type: "tool.finished"; id: string; tool: string; ok: boolean; result: string }
   | { type: "approval.required"; approval: ApprovalRequest }
   | { type: "approval.resolved"; id: string; approved: boolean }
@@ -67,7 +68,21 @@ export type AgentEvent =
       contextWindow: number | null;
     }
   | { type: "agent.finished" }
-  | { type: "agent.error"; error: string };
+  | { type: "agent.error"; error: string }
+  | { type: "agent.notice"; text: string }
+  | { type: "chat.list"; chats: ChatSummary[] }
+  | { type: "chat.loaded"; chat: ChatSummary; entries: unknown[] }
+  | { type: "chat.created"; chat: ChatSummary }
+  | { type: "chat.deleted"; id: string };
+
+/** A persisted conversation, scoped to a workspace ("project"). */
+export interface ChatSummary {
+  id: string;
+  workspace: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+}
 
 /** Messages sent by the client over the WebSocket. */
 export type AgentMode = "agent" | "ask" | "plan" | "bypass";
@@ -98,12 +113,20 @@ export type ClientMessage =
       /** Reasoning effort for thinking-capable models (sent only if supported). */
       thinkingEffort?: ThinkingEffort;
       autoApprove?: boolean;
+      /** Persisted chat to continue (null/omitted → new chat is created). */
+      chatId?: string | null;
     }
   | { type: "chat.cancel" }
   | { type: "chat.approve"; id: string; approved: boolean; always?: boolean; option?: string }
+  | { type: "chat.new" }
+  | { type: "chat.open"; id: string }
+  | { type: "chat.delete"; id: string }
+  | { type: "chat.list" }
+  | { type: "chat.sync"; chatId: string; entries: unknown[] }
   | { type: "terminal.input"; data: string }
   | { type: "terminal.resize"; cols: number; rows: number }
   | { type: "terminal.start" };
+
 
 export interface ProviderConfig {
   id: string;

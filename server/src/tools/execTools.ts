@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { getConfig } from "../config.js";
 import { checkCommand } from "../security/CommandPolicy.js";
+import { getCommandShell } from "../shell.js";
 import type { Tool } from "./ToolRegistry.js";
 
 const BLOCKED_MSG =
@@ -8,8 +9,7 @@ const BLOCKED_MSG =
 
 export const executeCommandTool: Tool = {
   name: "execute_command",
-  description:
-    "Execute a shell command in the workspace root (bash/zsh). Output (stdout+stderr) is returned, capped. Destructive system commands are hard-blocked; everything else requires user approval unless auto-approve is on.",
+  description: `Execute a shell command in the workspace root (${getCommandShell().name} — write the command in that syntax). Output (stdout+stderr) is returned, capped. Destructive system commands are hard-blocked; everything else requires user approval unless auto-approve is on.`,
   permission: "approval",
   parameters: {
     type: "object",
@@ -44,10 +44,10 @@ export const executeCommandTool: Tool = {
 export function runCommand(command: string, timeoutMs: number, signal: AbortSignal): Promise<string> {
   const maxOutput = 20000;
   const timeout = Math.min(Math.max(timeoutMs, 1000), 600_000);
-  const shell = process.platform === "win32" ? "powershell.exe" : process.env.SHELL || "/bin/bash";
+  const sh = getCommandShell();
 
   return new Promise((resolve) => {
-    const child = spawn(shell, process.platform === "win32" ? ["-Command", command] : ["-c", command], {
+    const child = spawn(sh.shell, [...sh.args, command], {
       cwd: getConfig().workspaceRoot,
       env: { ...process.env, TERM: "dumb", NO_COLOR: "1" },
       signal,

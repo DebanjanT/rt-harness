@@ -3,6 +3,7 @@ import type {
   AgentEvent,
   AgentMode,
   ApprovalRequest,
+  ChatSummary,
   FileChangeSummary,
   ImageAttachment,
   ModelCapabilities,
@@ -14,6 +15,7 @@ import type {
 import { harnessSocket } from "../lib/websocket";
 import { api } from "../lib/api";
 import { useEditorStore } from "./editor";
+import { useWorkspaceStore } from "./workspace";
 
 export interface ToolStep {
   id: string;
@@ -35,7 +37,8 @@ export type Segment =
   | { kind: "text"; text: string }
   | { kind: "thinking"; text: string }
   | { kind: "tool"; step: ToolStep }
-  | { kind: "approval"; approval: PendingApproval };
+  | { kind: "approval"; approval: PendingApproval }
+  | { kind: "notice"; text: string };
 
 export interface ChatEntry {
   role: "user" | "assistant";
@@ -94,6 +97,16 @@ interface ChatState {
   todos: TodoItem[];
   /** Files the agent changed this session (diff/undo surface). */
   changes: FileChangeSummary[];
+  /**
+   * Live "the model is generating a tool call" indicator (server emits
+   * throttled tool.progress while args stream, before the tool executes).
+   * For write/edit tools it carries a live preview of the growing content.
+   */
+  streamingTool: { tool: string; chars: number; path?: string; preview?: string } | null;
+  /** Active persisted chat (null = next message starts a fresh one). */
+  chatId: string | null;
+  /** Persisted chats for the current workspace, newest first. */
+  chats: ChatSummary[];
   input: string;
   loaded: boolean;
 
@@ -118,6 +131,14 @@ interface ChatState {
   resolveApproval: (id: string, approved: boolean, option?: string) => void;
   undoAllChanges: () => Promise<void>;
   keepChanges: () => Promise<void>;
+  /** Start a fresh conversation (persisted on first message). */
+  newChat: () => void;
+  /** Open a persisted chat (restores context + full timeline). */
+  openChat: (id: string) => void;
+  /** Delete a persisted chat. */
+  deleteChat: (id: string) => void;
+  /** Ask the server for the chat list of the current workspace. */
+  requestChats: () => void;
   handleEvent: (event: AgentEvent) => void;
 }
 
@@ -177,12 +198,26 @@ function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
+/** Debounced push of the display timeline to the server for persistence. */
+let syncTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleSync(get: () => ChatState) {
+  if (syncTimer) clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => {
+    syncTimer = null;
+    const s = get();
+    if (s.chatId) harnessSocket.send({ type: "chat.sync", chatId: s.chatId, entries: s.entries as unknown[] });
+  }, 600);
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   entries: [],
   running: false,
   iteration: 0,
   iterSegIdx: 0,
   iterCharStart: 0,
+  streamingTool: null,
+  chatId: null,
+  chats: [],
   providers: [],
   providerId: "",
   model: "",
@@ -219,6 +254,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Restore run state (survives client reloads while server stays up).
     api.getTodos().then((r) => set({ todos: r.todos })).catch(() => {});
     api.getChanges().then((r) => set({ changes: r.changes })).catch(() => {});
+
+    // Persisted chats are per workspace — refresh the list whenever the
+    // workspace root changes and start a fresh conversation for it.
+    harnessSocket.send({ type: "chat.list" });
+    let lastRoot = useWorkspaceStore.getState().root;
+    useWorkspaceStore.subscribe((s) => {
+      if (s.root && s.root !== lastRoot) {
+        lastRoot = s.root;
+        get().newChat();
+        harnessSocket.send({ type: "chat.list" });
+      }
+    });
   },
 
   setInput: (v) => set({ input: v }),
@@ -347,6 +394,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       images,
       attachments,
       autoApprove,
+      chatId: get().chatId,
     });
   },
 
@@ -374,6 +422,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (err) {
       console.error("keep failed:", err);
     }
+  },
+
+  newChat: () => {
+    harnessSocket.send({ type: "chat.new" });
+    set({
+      chatId: null,
+      entries: [],
+      running: false,
+      streamingTool: null,
+      iteration: 0,
+      iterSegIdx: 0,
+      iterCharStart: 0,
+    });
+  },
+
+  openChat: (id) => {
+    if (get().running) get().cancel();
+    harnessSocket.send({ type: "chat.open", id });
+  },
+
+  deleteChat: (id) => {
+    harnessSocket.send({ type: "chat.delete", id });
+  },
+
+  requestChats: () => {
+    harnessSocket.send({ type: "chat.list" });
   },
   resolveApproval: (id, approved, option) => {
     harnessSocket.send(option ? { type: "chat.approve", id, approved: true, option } : { type: "chat.approve", id, approved });
@@ -414,6 +488,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       case "message.delta":
         set((s) => ({
+          streamingTool: null,
           entries: updateLastAssistant(s.entries, (e) => ({
             ...e,
             segments: appendText(e.segments, event.text),
@@ -442,6 +517,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // IN PLACE — the raw stream is the first text segment at/after
         // iterSegIdx; thinking/tool segments around it keep their positions.
         set((s) => ({
+          streamingTool: null,
           entries: updateLastAssistant(s.entries, (e) => {
             if (event.text === "") return e;
             const segs = [...(Array.isArray(e.segments) ? e.segments : [])];
@@ -483,8 +559,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         break;
       }
 
+      case "tool.progress":
+        set({ streamingTool: { tool: event.tool, chars: event.chars } });
+        break;
+
       case "tool.started":
         set((s) => ({
+          streamingTool: null,
           entries: updateLastAssistant(s.entries, (e) => ({
             ...e,
             segments: [...e.segments, {
@@ -505,6 +586,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }),
           })),
         }));
+        scheduleSync(get);
         break;
 
       case "approval.required": {
@@ -531,20 +613,68 @@ export const useChatStore = create<ChatState>((set, get) => ({
       case "agent.finished":
         set((s) => ({
           running: false,
+          streamingTool: null,
           entries: updateLastAssistant(s.entries, (e) => ({ ...e, streaming: false })),
         }));
+        scheduleSync(get);
         break;
 
       case "agent.error":
         set((s) => ({
           running: false,
+          streamingTool: null,
           entries: updateLastAssistant(s.entries, (e) => ({
             ...e,
             streaming: false,
             error: event.error,
           })),
         }));
+        scheduleSync(get);
         break;
+
+      case "agent.notice":
+        set((s) => ({
+          entries: updateLastAssistant(s.entries, (e) => ({
+            ...e,
+            segments: [...e.segments, { kind: "notice", text: event.text } as Segment],
+          })),
+        }));
+        break;
+
+      case "chat.created":
+        set((s) => ({
+          chatId: event.chat.id,
+          chats: [event.chat, ...s.chats.filter((c) => c.id !== event.chat.id)],
+        }));
+        break;
+
+      case "chat.list":
+        set({ chats: event.chats });
+        break;
+
+      case "chat.loaded": {
+        // Restore the full persisted timeline (segments/tool cards included).
+        set({
+          chatId: event.chat.id,
+          chats: [event.chat, ...get().chats.filter((c) => c.id !== event.chat.id)],
+          entries: event.entries as ChatState["entries"],
+          running: false,
+          streamingTool: null,
+          iteration: 0,
+          iterSegIdx: 0,
+          iterCharStart: 0,
+        });
+        break;
+      }
+
+      case "chat.deleted": {
+        const wasCurrent = get().chatId === event.id;
+        set((s) => ({
+          chats: s.chats.filter((c) => c.id !== event.id),
+          ...(wasCurrent ? { chatId: null, entries: [], running: false, streamingTool: null } : {}),
+        }));
+        break;
+      }
 
       case "todos.updated":
         set({ todos: event.todos });

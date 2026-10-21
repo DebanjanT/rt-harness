@@ -40,6 +40,25 @@ function schema(properties: Record<string, unknown>, required: string[]) {
   return { type: "object", properties, required } as const;
 }
 
+/**
+ * Compact, size-safe echo of the args a model actually sent — included in
+ * validation errors so the model can self-correct in one retry instead of
+ * guessing (long strings like file content are elided).
+ */
+export function describeArgs(args: Record<string, unknown>): string {
+  try {
+    const safe = Object.fromEntries(
+      Object.entries(args).map(([k, v]) => [
+        k,
+        typeof v === "string" && v.length > 80 ? `<string, ${v.length} chars>` : v,
+      ]),
+    );
+    return JSON.stringify(safe).slice(0, 300);
+  } catch {
+    return "[unprintable args]";
+  }
+}
+
 /** Convert a Tool registry into OpenAI tool schemas. */
 export function toOpenAITools(tools: Tool[]): OpenAI.Chat.Completions.ChatCompletionTool[] {
   return tools.map((t) => ({

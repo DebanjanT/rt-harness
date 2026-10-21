@@ -1,12 +1,12 @@
 import type OpenAI from "openai";
 import type { AgentEvent, AgentMode, ImageAttachment, ProviderConfig, ThinkingEffort, ToolPermission } from "../types.js";
-import { createLLM } from "../llm/provider.js";
+import { createLLM, describeLlmError } from "../llm/provider.js";
 import { getConfig } from "../config.js";
 import { buildSystemPrompt, buildAttachmentBlock, type ContextInput } from "./ContextBuilder.js";
 import { createDefaultTools } from "../tools/index.js";
 import { toOpenAITools, type Tool, type ToolContext } from "../tools/ToolRegistry.js";
 import { makeDiff } from "../tools/fsTools.js";
-import { parseTextToolCalls, type ParsedToolCall } from "./TextToolCallParser.js";
+import { parseTextToolCalls, normalizeToolArgs, type ParsedToolCall } from "./TextToolCallParser.js";
 
 export type Emit = (event: AgentEvent) => void;
 
@@ -89,6 +89,80 @@ const TOOL_NUDGE = [
   "(Only if the request is purely informational and needs no file/command action, repeat your final answer unchanged.)",
 ].join(" ");
 
+/** Rough token estimate: ~4 chars per token for code/English. */
+const estimateTokens = (chars: number) => Math.ceil(chars / 4);
+
+/** Estimated prompt size in tokens (text parts only — image dataUrls would over-count). */
+function promptTokensOf(messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[]): number {
+  return estimateTokens(
+    messages.reduce((n, m) => {
+      const c = (m as { content?: unknown }).content;
+      if (typeof c === "string") return n + c.length;
+      if (Array.isArray(c)) {
+        return (
+          n +
+          c.reduce((k: number, part) => {
+            const p = part as { type?: string; text?: string };
+            return k + (p.type === "text" && p.text ? p.text.length : 0);
+          }, 0)
+        );
+      }
+      return n;
+    }, 0),
+  );
+}
+
+/**
+ * Compaction summarizer: compresses the oldest conversation messages into a
+ * terse brief the agent can continue from. Returns null on failure — the
+ * caller then falls back to hard trimming.
+ */
+async function summarizeForCompaction(
+  client: OpenAI,
+  model: string,
+  msgs: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+  signal: AbortSignal,
+): Promise<string | null> {
+  try {
+    const transcript = msgs
+      .map((m) => {
+        const c = (m as { content?: unknown }).content;
+        const text =
+          typeof c === "string"
+            ? c
+            : Array.isArray(c)
+              ? c.map((p) => (p as { text?: string }).text ?? "").join(" ")
+              : "";
+        return `[${m.role}] ${text.slice(0, 4000)}`;
+      })
+      .join("\n\n")
+      .slice(0, 48_000);
+    const res = await client.chat.completions.create(
+      {
+        model,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You compress a coding agent's older conversation into a terse brief that lets it continue the task seamlessly. " +
+              "Keep: the user's goal, decisions made, files created/modified (with paths), important errors and their fixes, " +
+              "and the exact current step. Bullet points, under 400 words, no padding.",
+          },
+          { role: "user", content: transcript },
+        ],
+        max_tokens: 800,
+        stream: false,
+      },
+      { signal },
+    );
+    const text = (res as OpenAI.Chat.Completions.ChatCompletion).choices?.[0]?.message?.content?.trim();
+    return text || null;
+  } catch (err) {
+    console.warn("[agent] compaction summary request failed:", (err as Error).message);
+    return null;
+  }
+}
+
 /**
  * Streaming splitter for inline <think>…</think> blocks (Qwen3 / DeepSeek-R1
  * style). Reasoning text is routed to the thinking timeline instead of the
@@ -153,6 +227,114 @@ export function flushThink(sp: ThinkSplitter): { thinking: string; content: stri
 }
 
 /**
+ * Streaming guard for TEXT-mode tool calls: once the model starts emitting a
+ * `<tool…>` tag, suppress the raw JSON from message.delta (it floods the chat
+ * and re-renders Markdown on every chunk — the "frozen chat" effect) and let
+ * the caller emit throttled tool.progress events instead. The final cleaned
+ * text arrives via message.done, which the client swaps in place.
+ *
+ * Chunks that merely *end* with a partial "<tool"/"<|tool" prefix are held
+ * back (a few chars) so the tag is never partially shown.
+ */
+const TOOL_TAG_PREFIXES = ["<tool_", "<tool.", "<tool:", "<tool>", "<tool ", "<|tool"] as const;
+
+export function createToolTextGuard() {
+  let hidden = false;
+  let hiddenChars = 0;
+  let tail = "";
+  return {
+    feed(chunk: string): { show: string; progress: number; tool: string | null; raw: string | null } {
+      if (hidden) {
+        tail += chunk;
+        hiddenChars += chunk.length;
+        return { show: "", progress: hiddenChars, tool: toolName(tail), raw: tail };
+      }
+      tail += chunk;
+      let idx = -1;
+      for (const p of TOOL_TAG_PREFIXES) {
+        const i = tail.indexOf(p);
+        if (i !== -1 && (idx === -1 || i < idx)) idx = i;
+      }
+      if (idx !== -1) {
+        const show = tail.slice(0, idx);
+        hidden = true;
+        hiddenChars = tail.length - idx;
+        tail = tail.slice(idx);
+        return { show, progress: hiddenChars, tool: toolName(tail), raw: tail };
+      }
+      // Hold back a trailing partial prefix (e.g. "<to") in case the tag
+      // continues in the next chunk.
+      let hold = 0;
+      for (const p of TOOL_TAG_PREFIXES) {
+        for (let l = Math.min(p.length - 1, tail.length); l > hold; l--) {
+          if (tail.endsWith(p.slice(0, l))) {
+            hold = l;
+            break;
+          }
+        }
+      }
+      const show = tail.slice(0, tail.length - hold);
+      tail = tail.slice(tail.length - hold);
+      return { show, progress: 0, tool: null, raw: null };
+    },
+  };
+}
+
+/** Best-effort tool-name extraction from a held `<tool…` tag head. */
+function toolName(head: string): string | null {
+  const m = /<tool(?:_call|_calls|call)?[.:]?\s*\.?\s*([A-Za-z_][\w.]*)/.exec(head);
+  return m ? m[1]!.replace(/[.].*$/, "") : null;
+}
+
+/**
+ * Decode a JSON string value that may still be mid-stream (trailing escape
+ * sequences stripped; parse failures yield null).
+ */
+function decodePartialJsonString(raw: string): string | null {
+  if (!raw) return null;
+  const trailingBackslashes = /\\+$/.exec(raw)?.[0].length ?? 0;
+  const cut = trailingBackslashes % 2 === 1 ? raw.length - 1 : raw.length;
+  try {
+    return JSON.parse('"' + raw.slice(0, cut) + '"') as string;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract a live write preview from partially-streamed tool arguments:
+ * the target path (once complete) and the growing file content. Powers the
+ * "✍ writing src/App.tsx…" live card in the UI so large edits are visible
+ * WHILE the model generates them instead of popping up after the fact.
+ */
+export function extractWritePreview(raw: string): { path?: string; preview?: string } {
+  const out: { path?: string; preview?: string } = {};
+  const pathM = /"path"\s*:\s*"((?:\\.|[^"\\])*)"/.exec(raw);
+  if (pathM) {
+    try {
+      out.path = JSON.parse('"' + pathM[1] + '"') as string;
+    } catch {
+      /* ignore malformed */
+    }
+  }
+  const contentM =
+    /"(?:content|new_text)"\s*:\s*"((?:\\.|[^"\\])*)"/.exec(raw) ?? // complete value
+    /"(?:content|new_text)"\s*:\s*"((?:\\.|[^"\\])*)$/.exec(raw); // still streaming
+  if (contentM) {
+    const decoded = decodePartialJsonString(contentM[1]);
+    if (decoded && decoded.length > 40) {
+      out.preview =
+        decoded.length > 6000
+          ? decoded.slice(0, 2000) +
+            `\n… [streaming — ${decoded.length} chars so far] …\n` +
+            decoded.slice(-3000)
+          : decoded;
+    }
+  }
+  return out;
+}
+
+/**
  * The agent loop:
  *   stream → accumulate content + tool_calls → execute tools → append results
  *   → repeat until the model answers without tools or we hit maxIterations.
@@ -164,7 +346,10 @@ export function flushThink(sp: ThinkSplitter): { thinking: string; content: stri
  *             recovers them; results are fed back as user-role "TOOL RESULT"
  *             messages because the server never issued tool_call ids.
  */
-export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void> {
+export async function runAgent(
+  opts: AgentRunOptions,
+  emit: Emit,
+): Promise<OpenAI.Chat.Completions.ChatCompletionMessageParam[]> {
   const client = createLLM(opts.provider);
   const cfg = getConfig();
   const tools: Tool[] = createDefaultTools();
@@ -183,6 +368,12 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
   // One-time corrective re-prompt when the model gives instructions instead of
   // calling tools (e.g. "you can run: touch sample.txt").
   let nudged = false;
+  /** Context size (prompt tokens) of the most recent request — for diagnostics. */
+  let lastContextTokens = 0;
+  /** Sent once per run when the context guard has to trim history. */
+  let contextNoticeSent = false;
+  /** Number of LLM-based compactions performed during this run. */
+  let contextCompactions = 0;
 
   // ---- usage tracking ----
   let totalInputTokens = 0;
@@ -243,7 +434,10 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
   emit({ type: "agent.started", providerId: opts.provider.id, model: opts.model });
 
   /** Shared tool executor — used by both native and text paths. */
-  const executeToolCall = async (callId: string, name: string, args: Record<string, unknown>) => {
+  const executeToolCall = async (callId: string, name: string, rawArgs: Record<string, unknown>) => {
+    // Lift alias keys (file/file_path/… → path) for BOTH native and text-mode
+    // calls — small models frequently use the wrong arg name.
+    const args = normalizeToolArgs(rawArgs);
     const tool = toolByName.get(name);
     if (!tool) {
       const msg = `Error: unknown tool "${name}". Available tools: ${knownToolNames.join(", ")}`;
@@ -375,6 +569,97 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
       if (opts.signal.aborted) throw new DOMException("Aborted by user", "AbortError");
       emit({ type: "agent.iteration", iteration });
 
+      // ---- Context-window guard ------------------------------------------
+      // The prompt must fit the model's context window (discovered from the
+      // provider's /models metadata). If it overflows, drop the OLDEST
+      // history messages — keeping assistant tool_calls/tool-result pairing
+      // intact — and tell the user what happened and what to do about it.
+      // ---- Context guard: reserve output, compact early, trim last ----------
+      if (contextWindow && contextWindow > 0) {
+        // The window holds input AND generated tokens — reserve room for the
+        // model's output plus a safety margin before managing the input side.
+        const inputBudget = Math.max(2048, contextWindow - cfg.agent.maxOutputTokens - 1024);
+        // Start compaction EARLY (~80% of usable input) instead of waiting for
+        // a hard failure — summarization needs headroom to work with.
+        const softLimit = Math.round(inputBudget * 0.8);
+        const promptTokensNow = () => promptTokensOf(messages);
+        let preTokens = promptTokensNow();
+
+        // -- 1. Early COMPACTION: summarize the oldest messages instead of
+        //       deleting them. Recent messages are always kept verbatim.
+        const KEEP_RECENT = 8;
+        if (preTokens > softLimit && messages.length > KEEP_RECENT + 3) {
+          let cutoff = messages.length - KEEP_RECENT;
+          // The kept region must not start with an orphaned tool result.
+          while (cutoff > 1 && (messages[cutoff] as { role?: string }).role === "tool") cutoff++;
+          if (cutoff > 1) {
+            const removed = cutoff - 1;
+            const summary = await summarizeForCompaction(
+              client, opts.model, messages.slice(1, cutoff), opts.signal,
+            );
+            if (summary && !opts.signal.aborted) {
+              messages.splice(1, cutoff - 1, {
+                role: "user",
+                content:
+                  `[Conversation compacted by the harness — ${removed} older message(s) were ` +
+                  `replaced with this summary; treat it as memory of the earlier work]\n` +
+                  summary,
+              });
+              const afterTokens = promptTokensNow();
+              console.log(
+                `[agent] context compaction: ${removed} messages → ${summary.length}-char summary ` +
+                `(prompt ~${preTokens} → ~${afterTokens} tokens)`,
+              );
+              emit({
+                type: "agent.notice",
+                text:
+                  `Context compaction: the prompt reached ~${Math.round(preTokens / 1000)}k tokens ` +
+                  `(model window ${Math.round(contextWindow! / 1000)}k). The ${removed} oldest message(s) were ` +
+                  `replaced with a short summary so the run can continue — recent messages and the current task are untouched.`,
+              });
+              preTokens = afterTokens;
+              contextCompactions++;
+            }
+          }
+        }
+
+        // -- 2. Hard-trim safety net: only if still over the real budget
+        //       (compaction failed, or a single huge message blocks it).
+        //       The compaction summary is the LAST thing dropped — it packs
+        //       the most task state per token.
+        let trimmed = 0;
+        const isSummaryMsg = (m: unknown) =>
+          typeof (m as { content?: string }).content === "string" &&
+          ((m as { content?: string }).content ?? "").startsWith("[Conversation compacted by the harness");
+        while (promptTokensNow() > inputBudget && messages.length > 2) {
+          // Prefer dropping the oldest non-summary message.
+          let i = 1;
+          while (i < messages.length - 1 && isSummaryMsg(messages[i])) i++;
+          const first = messages[i] as { role?: string; tool_calls?: unknown[] };
+          if (first?.role === "assistant" && Array.isArray(first.tool_calls) && first.tool_calls.length > 0) {
+            let j = i + 1;
+            while (j < messages.length && (messages[j] as { role?: string }).role === "tool") j++;
+            messages.splice(i, j - i);
+          } else {
+            messages.splice(i, 1);
+          }
+          trimmed++;
+        }
+        lastContextTokens = promptTokensNow();
+        if (trimmed > 0 && !contextNoticeSent) {
+          contextNoticeSent = true;
+          console.log(`[agent] context guard: trimmed ${trimmed} oldest message(s) to fit ${contextWindow}-token window`);
+          emit({
+            type: "agent.notice",
+            text:
+              `Context guard: this chat reached ~${Math.round(preTokens / 1000)}k tokens, over the model's ` +
+              `${Math.round(contextWindow! / 1000)}k-token window. ${trimmed} oldest message(s) were trimmed ` +
+              `so the run can continue — the model may have forgotten those earlier details. ` +
+              `For a clean slate use "＋ New chat"; to keep more history, @-mention fewer files or switch to a larger-context model.`,
+          });
+        }
+      }
+
       let stream: Awaited<ReturnType<typeof client.chat.completions.create>>;
       const effort =
         opts.thinkingEffort && opts.thinkingEffort !== "off" && !thinkingUnsupported
@@ -441,7 +726,7 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
               `The selected model "${opts.model}" does not support image input (vision). ` +
               "Remove the attached image(s) or switch to a vision-capable model.",
           });
-          return;
+          return messages;
         }
         // mlx_lm.server: its generation thread can die (commonly GPU OOM on
         // 8GB Macs after many agent-loop requests grow the prompt cache).
@@ -456,7 +741,7 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
               `(adds --prompt-cache-size 2 --max-tokens 1024 --prefill-step-size 1024), ` +
               `then try again. Alternatively switch provider/model.`,
           });
-          return;
+          return messages;
         }
         throw err;
       }
@@ -467,6 +752,8 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
       let providerUsage: { prompt_tokens?: number; completion_tokens?: number } | null = null;
       const streamStart = Date.now();
       const thinkSp: ThinkSplitter = { phase: "start", buf: "" };
+      const toolTextGuard = createToolTextGuard();
+      let lastProgressEmit = 0;
 
       for await (const chunk of stream) {
         if (opts.signal.aborted) {
@@ -499,7 +786,21 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
           }
           if (parts.content) {
             content += parts.content;
-            emit({ type: "message.delta", text: parts.content });
+            // Suppress raw text-mode tool-call JSON from the chat (floods and
+            // freezes the UI); surface throttled progress + a live write
+            // preview instead.
+            const shown = toolTextGuard.feed(parts.content);
+            if (shown.show) emit({ type: "message.delta", text: shown.show });
+            if (shown.progress > 0 && Date.now() - lastProgressEmit >= 400) {
+              lastProgressEmit = Date.now();
+              const prev = shown.raw ? extractWritePreview(shown.raw) : {};
+              emit({
+                type: "tool.progress",
+                tool: shown.tool ?? "tool call",
+                chars: shown.progress,
+                ...prev,
+              });
+            }
           }
         }
         if (delta.tool_calls) {
@@ -510,6 +811,20 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
             if (tc.function?.name) existing.name += tc.function.name;
             if (tc.function?.arguments) existing.argsJson += tc.function.arguments;
             pendingCalls.set(idx, existing);
+          }
+          // Native tool-call args stream invisibly — show live progress so
+          // the UI never looks frozen while a big write_file is generated.
+          if (Date.now() - lastProgressEmit >= 400) {
+            lastProgressEmit = Date.now();
+            const calls = [...pendingCalls.values()];
+            const names = [...new Set(calls.map((c) => c.name).filter(Boolean))].join(", ");
+            const prev = extractWritePreview(calls.map((c) => c.argsJson).join(","));
+            emit({
+              type: "tool.progress",
+              tool: names || "tool",
+              chars: calls.reduce((n, c) => n + c.argsJson.length, 0),
+              ...prev,
+            });
           }
         }
       }
@@ -522,7 +837,8 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
       }
       if (flushed.content) {
         content += flushed.content;
-        emit({ type: "message.delta", text: flushed.content });
+        const shown = toolTextGuard.feed(flushed.content);
+        if (shown.show) emit({ type: "message.delta", text: shown.show });
       }
 
       // Debug aid: confirms thinking/content mapping is wired correctly.
@@ -535,14 +851,7 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
       // ---- Usage accounting for this request --------------------------------
       requests++;
       const elapsedSec = Math.max((Date.now() - streamStart) / 1000, 0.001);
-      // Estimate: ~4 chars per token is a good approximation for code/English.
-      const estimateTokens = (chars: number) => Math.ceil(chars / 4);
-      const promptChars = messages.reduce((n, m) => {
-        const c = m.content;
-        if (typeof c === "string") return n + c.length;
-        if (Array.isArray(c)) return n + c.reduce((k: number, part) => k + ((part as { text?: string }).text?.length ?? 0), 0);
-        return n;
-      }, 0);
+      const promptChars = promptTokensOf(messages) * 4; // inverse of the shared estimator
       const outputChars =
         content.length +
         thinking.length +
@@ -552,6 +861,7 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
       totalInputTokens += inputTokens;
       totalOutputTokens += outputTokens;
       const contextTokens = inputTokens;
+      lastContextTokens = contextTokens;
       emit({
         type: "usage",
         inputTokens,
@@ -615,7 +925,7 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
         }
 
         emit({ type: "agent.finished" });
-        return;
+        return messages;
       }
 
       // ---- Execute ----------------------------------------------------------
@@ -696,11 +1006,12 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
     }
 
     emit({ type: "agent.finished" });
+    return messages;
   } catch (err) {
     if ((err as Error).name === "AbortError") {
       emit({ type: "message.done", text: "" });
       emit({ type: "agent.finished" });
-      return;
+      return messages;
     }
     console.error("[agent] run failed:", err);
     const errMsg = (err as Error).message ?? "";
@@ -714,8 +1025,9 @@ export async function runAgent(opts: AgentRunOptions, emit: Emit): Promise<void>
           `(adds --prompt-cache-size 2 --max-tokens 1024 --prefill-step-size 1024), ` +
           `then try again. Alternatively switch provider/model.`,
       });
-      return;
+      return messages;
     }
-    emit({ type: "agent.error", error: errMsg });
+    emit({ type: "agent.error", error: describeLlmError(err, lastContextTokens) });
+    return messages;
   }
 }

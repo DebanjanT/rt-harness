@@ -165,6 +165,21 @@ if (!path.isAbsolute(cfg.workspaceRoot)) {
   cfg.workspaceRoot = path.resolve(__dirname, "../../", cfg.workspaceRoot);
 }
 
+// The committed data/harness.db can carry a workspaceRoot from another
+// machine (e.g. a macOS path). If it doesn't exist here, fall back so
+// PTY/fs/exec tools don't spawn with an invalid cwd (Windows CreateProcess
+// error 267). Not persisted — the next workspace picked in the UI wins.
+if (
+  !fsSync.existsSync(cfg.workspaceRoot) ||
+  !fsSync.statSync(cfg.workspaceRoot).isDirectory()
+) {
+  const fallback = defaultConfig().workspaceRoot;
+  console.warn(
+    `[config] workspaceRoot "${cfg.workspaceRoot}" does not exist on this machine — falling back to "${fallback}"`,
+  );
+  cfg.workspaceRoot = fallback;
+}
+
 // ---- public API (same shape as the old config.ts) --------------------------
 
 export function getConfig(): StoredConfig & HarnessConfig {

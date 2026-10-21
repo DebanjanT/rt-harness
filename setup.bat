@@ -155,11 +155,11 @@ REM ----------------------------------------------------------------------------
 echo.
 echo [setup] Verifying native modules (better-sqlite3, node-pty)...
 pushd server
-node -e "require('better-sqlite3'); require('node-pty')" >nul 2>&1
+node -e "require('better-sqlite3'); require('@lydell/node-pty')" >nul 2>&1
 if errorlevel 1 (
-    echo [warn] Native modules broken - attempting rebuild from source...
-    echo [warn] If this fails, install Visual Studio Build Tools: npm install -g windows-build-tools
-    call npm rebuild better-sqlite3 node-pty --build-from-source
+    echo [warn] Native modules broken - attempting rebuild...
+    echo [warn] If this fails, install Visual Studio Build Tools with the C++ workload.
+    call npm rebuild better-sqlite3 @lydell/node-pty
     if errorlevel 1 ( popd & echo [fail] Native module rebuild failed & pause & exit /b 1 )
 )
 popd

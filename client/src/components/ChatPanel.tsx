@@ -22,11 +22,17 @@ function ModeBadge({ mode }: { mode?: AgentMode }) {
 
 function StatsBar() {
   const usage = useChatStore((s) => s.usage);
-  if (!usage) return null;
+
+  // Always render so the stats row is a stable, visible part of the chat
+  // header — before the first request it shows dashes instead of vanishing.
+  const u = usage ?? {
+    inputTokens: 0, outputTokens: 0, totalInputTokens: 0, totalOutputTokens: 0,
+    requests: 0, tokensPerSec: 0, contextTokens: 0, contextWindow: null as number | null,
+  };
 
   const ctxPct =
-    usage.contextWindow && usage.contextWindow > 0
-      ? Math.min(100, Math.round((usage.contextTokens / usage.contextWindow) * 100))
+    u.contextWindow && u.contextWindow > 0
+      ? Math.min(100, Math.round((u.contextTokens / u.contextWindow) * 100))
       : null;
 
   const fmt = (n: number) =>
@@ -34,25 +40,27 @@ function StatsBar() {
     : n >= 1_000 ? `${(n / 1_000).toFixed(1)}k`
     : String(n);
 
+  const dim = "font-mono text-ink-3";
+
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-line
       bg-surface-2/60 px-3 py-1 text-[10px] text-ink-3">
       <span title="Model requests in this run">
-        req <span className="font-mono text-ink-2">{usage.requests}</span>
+        req <span className={u.requests ? "font-mono text-ink-2" : dim}>{u.requests || "–"}</span>
       </span>
       <span title="Output tokens per second (last request)">
-        <span className="font-mono text-ink-2">{usage.tokensPerSec}</span> tok/s
+        <span className={u.tokensPerSec ? "font-mono text-ink-2" : dim}>{u.tokensPerSec || "–"}</span> tok/s
       </span>
       <span title="Input tokens (last / total)">
-        in <span className="font-mono text-ink-2">{fmt(usage.inputTokens)}</span>
-        <span className="text-ink-3"> / {fmt(usage.totalInputTokens)}</span>
+        in <span className={u.inputTokens ? "font-mono text-ink-2" : dim}>{u.inputTokens ? fmt(u.inputTokens) : "–"}</span>
+        <span className="text-ink-3"> / {fmt(u.totalInputTokens)}</span>
       </span>
       <span title="Output tokens (last / total)">
-        out <span className="font-mono text-ink-2">{fmt(usage.outputTokens)}</span>
-        <span className="text-ink-3"> / {fmt(usage.totalOutputTokens)}</span>
+        out <span className={u.outputTokens ? "font-mono text-ink-2" : dim}>{u.outputTokens ? fmt(u.outputTokens) : "–"}</span>
+        <span className="text-ink-3"> / {fmt(u.totalOutputTokens)}</span>
       </span>
       {ctxPct !== null ? (
-        <span className="flex items-center gap-1.5" title={`Context: ${fmt(usage.contextTokens)} of ${fmt(usage.contextWindow!)} tokens`}>
+        <span className="flex items-center gap-1.5" title={`Context: ${fmt(u.contextTokens)} of ${fmt(u.contextWindow!)} tokens`}>
           ctx
           <span className="relative h-1.5 w-16 overflow-hidden rounded-full bg-zinc-800">
             <span
@@ -62,10 +70,11 @@ function StatsBar() {
             />
           </span>
           <span className="font-mono text-ink-2">{ctxPct}%</span>
+          <span className="text-ink-3">({fmt(u.contextTokens)}/{fmt(u.contextWindow!)})</span>
         </span>
       ) : (
         <span title="Context window size is not reported by this provider">
-          ctx <span className="font-mono text-ink-2">{fmt(usage.contextTokens)}</span>
+          ctx <span className={u.contextTokens ? "font-mono text-ink-2" : dim}>{u.contextTokens ? fmt(u.contextTokens) : "–"}</span>
         </span>
       )}
     </div>
@@ -84,6 +93,15 @@ function AssistantSegments({ segments, streaming }: { segments: Segment[]; strea
         }
         if (seg.kind === "approval") {
           return seg.approval ? <ApprovalCard key={seg.approval.id || i} approval={seg.approval} /> : null;
+        }
+        if (seg.kind === "notice") {
+          return (
+            <div key={i} className="flex items-start gap-1.5 rounded-lg border border-amber-900/40
+              bg-amber-950/20 px-3 py-2 text-[11px] leading-relaxed break-words text-amber-300/90">
+              <span>ℹ</span>
+              <span>{seg.text}</span>
+            </div>
+          );
         }
         if (seg.kind === "thinking") {
           // "Live" = the agent is still streaming AND this is the newest segment
@@ -149,7 +167,99 @@ function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
   );
 }
 
-function ChatMessage({ entry, entryIndex }: { entry: import("../stores/chat").ChatEntry; entryIndex: number }) {
+function ChatSwitcher() {
+  const chats = useChatStore((s) => s.chats);
+  const chatId = useChatStore((s) => s.chatId);
+  const running = useChatStore((s) => s.running);
+  const newChat = useChatStore((s) => s.newChat);
+  const openChat = useChatStore((s) => s.openChat);
+  const deleteChat = useChatStore((s) => s.deleteChat);
+
+  const fmtTime = (ts: number) => {
+    const d = new Date(ts);
+    const today = new Date();
+    return d.toDateString() === today.toDateString()
+      ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      : d.toLocaleDateString([], { month: "short", day: "numeric" });
+  };
+
+  return (
+    <div className="flex items-center gap-1.5 px-3 pt-2">
+      <button
+        onClick={newChat}
+        disabled={running}
+        title="Start a fresh conversation"
+        className="rounded-md border border-line-strong bg-surface-3 px-2 py-1 text-[10px]
+          text-ink-2 transition-colors hover:text-zinc-100 disabled:opacity-50"
+      >
+        ＋ New chat
+      </button>
+      <select
+        value={chatId ?? ""}
+        onChange={(e) => e.target.value && openChat(e.target.value)}
+        disabled={running}
+        className="min-w-0 flex-1 rounded-md border border-line bg-surface-2 px-1.5 py-1 text-[10px]
+          text-ink-2 outline-none disabled:opacity-50"
+      >
+        <option value="">Previous chats ({chats.length})…</option>
+        {chats.map((c) => (
+          <option key={c.id} value={c.id}>
+            {c.title} · {fmtTime(c.updatedAt)}
+          </option>
+        ))}
+      </select>
+      {chatId && (
+        <button
+          onClick={() => deleteChat(chatId)}
+          disabled={running}
+          title="Delete current chat"
+          className="rounded-md border border-line bg-surface-3 px-1.5 py-1 text-[10px]
+            text-ink-3 transition-colors hover:text-red-400 disabled:opacity-50"
+        >
+          🗑
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** Live preview card while the model streams a big write/edit call. */
+function LiveWritePreview({ path, chars, preview }: { path?: string; chars: number; preview: string }) {
+  const preRef = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    if (preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight;
+  }, [preview]);
+  return (
+    <div className="min-w-0 max-w-full overflow-hidden rounded-lg rounded-bl-sm border
+      border-accent/40 bg-surface-2/70">
+      <div className="flex items-center gap-1.5 border-b border-line px-3 py-1.5 text-[11px] text-ink-2">
+        <span className="animate-pulse text-accent">✍</span>
+        <span>streaming</span>
+        <span className="font-mono text-ink-2">{path ?? "…"}</span>
+        <span className="ml-auto font-mono text-ink-3">
+          {chars >= 1024 ? `${(chars / 1024).toFixed(1)} kB` : `${chars} B`}
+        </span>
+      </div>
+      <pre
+        ref={preRef}
+        className="max-h-48 overflow-y-auto px-3 py-2 text-[11px] leading-relaxed
+          whitespace-pre-wrap break-words text-ink-3"
+      >
+        {preview}
+      </pre>
+    </div>
+  );
+}
+
+function ChatMessage({
+  entry,
+  entryIndex,
+  streamingTool,
+}: {
+  entry: import("../stores/chat").ChatEntry;
+  entryIndex: number;
+  streamingTool: { tool: string; chars: number; path?: string; preview?: string } | null;
+}) {
   if (entry.role === "user") {
     // Thumbnail strip: images (visual thumb) + pinned @-files (chip thumb).
     const thumbs: { kind: "image" | "file"; name: string; dataUrl?: string }[] = [
@@ -195,6 +305,28 @@ function ChatMessage({ entry, entryIndex }: { entry: import("../stores/chat").Ch
   return (
     <div className="mr-2 flex min-w-0 flex-col gap-1.5">
       <AssistantSegments segments={entry.segments} streaming={entry.streaming} />
+      {/* Live "generating a tool call" indicator — shown while the model is
+          still streaming the tool-call arguments (before tool.started). For
+          write/edit tools a live preview of the growing file is shown. */}
+      {entry.streaming && streamingTool && (streamingTool.preview ? (
+        <LiveWritePreview
+          path={streamingTool.path}
+          chars={streamingTool.chars}
+          preview={streamingTool.preview}
+        />
+      ) : (
+        <div className="flex items-center gap-1.5 px-1 text-[11px] text-ink-3">
+          <span className="animate-pulse text-accent">✎</span>
+          <span>
+            building <span className="font-mono text-ink-2">{streamingTool.tool}</span> call…
+          </span>
+          <span className="font-mono">
+            {streamingTool.chars >= 1024
+              ? `${(streamingTool.chars / 1024).toFixed(1)} kB`
+              : `${streamingTool.chars} B`}
+          </span>
+        </div>
+      ))}
       {/* Plan mode: approval card with parsed steps after the model's plan */}
       {entry.role === "assistant" && entry.mode === "plan" && !entry.error && (
         <PlanApprovalCard entryIndex={entryIndex} />
@@ -242,6 +374,9 @@ export function ChatPanel() {
 
       <StatsBar />
 
+      {/* Persisted conversations: new chat / switch / delete */}
+      <ChatSwitcher />
+
       {/* plain scroll container so programmatic stick-to-bottom is reliable.
           Flex-1 min-h-0 keeps the Composer pinned to the bottom edge. */}
       <div
@@ -260,7 +395,9 @@ export function ChatPanel() {
             </div>
           )}
           <div className="flex flex-col gap-2.5">
-            {chat.entries.map((entry, i) => <ChatMessage key={i} entry={entry} entryIndex={i} />)}
+            {chat.entries.map((entry, i) => (
+              <ChatMessage key={i} entry={entry} entryIndex={i} streamingTool={chat.streamingTool} />
+            ))}
           </div>
           {chat.running && chat.iteration > 0 && (
             <div className="py-2 text-center text-[11px] italic text-ink-3">

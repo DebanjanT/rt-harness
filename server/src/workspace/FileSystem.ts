@@ -12,6 +12,40 @@ export function resolveInWorkspace(relPath: string): string {
   return target;
 }
 
+/**
+ * Best-effort normalization of an LLM-supplied path — small models often send
+ * absolute paths ("E:\proj\src\App.tsx", "/src/App.tsx") or wrap them in
+ * quotes/file://. Returns a clean workspace-relative path with forward
+ * slashes; "" when nothing usable remains (the caller then rejects).
+ */
+export function normalizeWorkspaceRelPath(raw: unknown): string {
+  let s = typeof raw === "string" ? raw.trim() : "";
+  if (!s) return "";
+  s = s.replace(/^file:\/\//i, "").replace(/^["']|["']$/g, "").trim();
+  const root = path.resolve(getConfig().workspaceRoot);
+  if (/^[a-zA-Z]:[\\/]/.test(s)) {
+    // Drive-letter absolute path: only usable if it lives INSIDE the workspace.
+    const abs = path.resolve(s);
+    if (abs === root || abs.startsWith(root + path.sep)) {
+      s = path.relative(root, abs);
+    } else {
+      return ""; // genuinely outside the workspace — caller rejects with received args
+    }
+  } else if (s.startsWith("/") || s.startsWith("\\")) {
+    const abs = path.resolve(s);
+    if (abs === root || abs.startsWith(root + path.sep)) {
+      s = path.relative(root, abs);
+    } else {
+      s = s.replace(/^[\\/]+/, ""); // "/src/x" style — almost always means workspace-relative
+    }
+  }
+  return s
+    .replace(/^[\\/]+/, "")
+    .replace(/^(\.[\\/])+/, "") // leading "./"
+    .replace(/[\\/]+$/, "")
+    .replace(/\\/g, "/");
+}
+
 export async function pathExists(p: string): Promise<boolean> {
   try {
     await fs.access(p);

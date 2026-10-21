@@ -2,6 +2,7 @@ import os from "node:os";
 import { getTreeText, getTree } from "../workspace/FileSystem.js";
 import type { FileNode } from "../workspace/FileSystem.js";
 import type { AgentMode } from "../types.js";
+import { getCommandShell } from "../shell.js";
 
 export interface ContextInput {
   userText: string;
@@ -98,7 +99,11 @@ ${knownToolHints}
    "completed" and move to the next. Keep the list accurate — the user watches
    it live. Skip todo_write only for trivial one-step requests.
 9. Context: user pinned files = ${attachmentNames}. CWD is the workspace root.
-   Platform: ${os.platform()}.
+   Platform: ${os.platform()}. Shell for execute_command: ${getCommandShell().name}${
+     getCommandShell().kind === "powershell"
+       ? " — write commands in PowerShell syntax (Get-ChildItem, Remove-Item, Copy-Item, $env:VAR). Plain bash commands like ls/rm/cat will NOT work."
+       : " — POSIX syntax (ls, rm -rf, mkdir -p, grep, pipes) works."
+   }.
 9. ${MODE_INSTRUCTIONS[mode]}
 
 Final answers: plain, concise markdown.`;

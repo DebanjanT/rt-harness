@@ -2,8 +2,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { getConfig } from "../config.js";
 import { resolveInWorkspace, isBinaryPath, looksBinary } from "../security/PathPolicy.js";
-import { pathExists } from "../workspace/FileSystem.js";
+import { pathExists, normalizeWorkspaceRelPath } from "../workspace/FileSystem.js";
 import type { Tool } from "./ToolRegistry.js";
+import { describeArgs } from "./ToolRegistry.js";
 
 function trunc(s: string, max: number): string {
   if (s.length <= max) return s;
@@ -25,7 +26,10 @@ export const readFileTool: Tool = {
     required: ["path"],
   },
   async execute(args) {
-    const rel = String(args.path ?? "");
+    const rel = normalizeWorkspaceRelPath(args.path);
+    if (!rel) {
+      return `Error: invalid or missing "path". Use a workspace-RELATIVE file path like "src/App.tsx". Received: ${describeArgs(args)}`;
+    }
     const abs = resolveInWorkspace(rel);
     if (isBinaryPath(rel)) return `Error: "${rel}" looks like a binary file.`;
     let content: string;
@@ -87,12 +91,12 @@ export const writeFileTool: Tool = {
     required: ["path", "content"],
   },
   async execute(args, ctx) {
-    const rel = String(args.path ?? "").trim();
+    const rel = normalizeWorkspaceRelPath(args.path);
     const content = String(args.content ?? "");
 
     // Arg validation — small local models sometimes omit or mangle the path.
-    if (!rel || rel === "." || rel === "/") {
-      return 'Error: invalid or missing "path". Provide a workspace-RELATIVE file path, e.g. "sample.txt" or "src/App.tsx". Do not use the folder root.';
+    if (!rel || rel === ".") {
+      return `Error: invalid or missing "path". Provide a workspace-RELATIVE file path, e.g. "sample.txt" or "src/App.tsx". Received: ${describeArgs(args)}`;
     }
     if (!args.content || typeof args.content !== "string") {
       return 'Error: invalid or missing "content". Pass the complete file content as a string.';
@@ -139,11 +143,11 @@ export const editFileTool: Tool = {
     required: ["path", "old_text", "new_text"],
   },
   async execute(args, ctx) {
-    const rel = String(args.path ?? "").trim();
+    const rel = normalizeWorkspaceRelPath(args.path);
     const oldText = String(args.old_text ?? "");
     const newText = String(args.new_text ?? "");
-    if (!rel || rel === "." || rel === "/") {
-      return 'Error: invalid or missing "path". Provide a workspace-RELATIVE file path, e.g. "src/App.tsx".';
+    if (!rel || rel === ".") {
+      return `Error: invalid or missing "path". Provide a workspace-RELATIVE file path, e.g. "src/App.tsx". Received: ${describeArgs(args)}`;
     }
     if (!oldText) {
       return 'Error: invalid or missing "old_text". Pass the exact existing text to replace.';

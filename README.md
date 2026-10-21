@@ -47,7 +47,7 @@ Both scripts support `--no-run` to install without starting. They will:
 1. Install Node.js 20+ if missing (NodeSource/apt/dnf/pacman/brew/winget/choco/MSI)
 2. Install build tools on Linux if native modules need compiling
 3. `npm install` in the root, `server/`, and `client/`
-4. Verify better-sqlite3 + node-pty load (rebuild from source if not)
+4. Verify better-sqlite3 + node-pty load (prebuilt binaries are used; rebuild only if broken)
 5. Run a verification build of server + client
 6. Offer to `npm run dev` right away
 

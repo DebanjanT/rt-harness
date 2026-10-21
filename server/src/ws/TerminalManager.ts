@@ -3,8 +3,9 @@ import path from "node:path";
 import fsSync from "node:fs";
 import { createRequire } from "node:module";
 import type WebSocket from "ws";
-import type { IPty } from "node-pty";
+import type { IPty } from "@lydell/node-pty";
 import { getConfig } from "../config.js";
+import { getInteractiveShell } from "../shell.js";
 
 const require = createRequire(import.meta.url);
 
@@ -20,7 +21,7 @@ function ensurePtySpawnHelper(): void {
   if (os.platform() !== "darwin") return;
   try {
     const helperPath = path.join(
-      path.dirname(require.resolve("node-pty/package.json")),
+    path.dirname(require.resolve("@lydell/node-pty/package.json")),
       "prebuilds",
       `darwin-${os.arch()}`,
       "spawn-helper",
@@ -38,8 +39,8 @@ function ensurePtySpawnHelper(): void {
 }
 ensurePtySpawnHelper();
 
-function loadPty(): typeof import("node-pty") {
-  return require("node-pty") as typeof import("node-pty");
+function loadPty(): typeof import("@lydell/node-pty") {
+  return require("@lydell/node-pty") as typeof import("@lydell/node-pty");
 }
 
 export class TerminalManager {
@@ -60,13 +61,22 @@ export class TerminalManager {
     if (this.started) return;
     this.started = true;
 
-    const cwd = getConfig().workspaceRoot;
-    const isWin = os.platform() === "win32";
-    const shell = isWin ? "powershell.exe" : process.env.SHELL || "/bin/zsh";
+    const sh = getInteractiveShell();
+    const shell = sh.shell;
+
+    // Defensive: a stale workspaceRoot (deleted dir, path from another OS)
+    // makes CreateProcess fail with error 267 (ERROR_DIRECTORY) on Windows.
+    let cwd = getConfig().workspaceRoot;
+    try {
+      if (!fsSync.statSync(cwd).isDirectory()) throw new Error("not a directory");
+    } catch {
+      console.warn(`[terminal] workspace "${cwd}" unavailable — using home directory`);
+      cwd = os.homedir();
+    }
 
     try {
       const pty = loadPty();
-      this.pty = pty.spawn(shell, [], {
+      this.pty = pty.spawn(shell, sh.args, {
         name: "xterm-256color",
         cols: 80,
         rows: 24,
@@ -85,13 +95,13 @@ export class TerminalManager {
         this.started = false;
       });
 
-      this.send(`\x1b[90m-- rt-harness terminal (${shell}) --\x1b[0m\r\n`);
-      console.log(`[terminal] PTY started: ${shell} @ ${cwd}`);
+      this.send(`\x1b[90m-- rt-harness terminal (${sh.name}) --\x1b[0m\r\n`);
+      console.log(`[terminal] PTY started: ${sh.name} (${shell}) @ ${cwd}`);
     } catch (err) {
       console.error("[terminal] failed to start PTY:", err);
       this.send(
         `\r\n\x1b[31mFailed to start shell: ${(err as Error).message}\x1b[0m\r\n` +
-          `\x1b[90mTip: run 'chmod +x server/node_modules/node-pty/prebuilds/*/spawn-helper'\x1b[0m\r\n`,
+          `\x1b[90mTip: run 'chmod +x server/node_modules/@lydell/node-pty/prebuilds/*/spawn-helper'\x1b[0m\r\n`,
       );
       this.started = false;
     }

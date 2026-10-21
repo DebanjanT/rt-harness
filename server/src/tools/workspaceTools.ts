@@ -1,9 +1,10 @@
 import fsSync from "node:fs";
 import path from "node:path";
 import type { Tool } from "./ToolRegistry.js";
-import { resolveInWorkspace, pathExists } from "../workspace/FileSystem.js";
+import { resolveInWorkspace, pathExists, normalizeWorkspaceRelPath } from "../workspace/FileSystem.js";
 import { getConfig } from "../config.js";
 import { getTreeText } from "../workspace/FileSystem.js";
+import { describeArgs } from "./ToolRegistry.js";
 
 /**
  * Workspace-management tools (mkdir, delete, move, workspace info) —
@@ -23,9 +24,9 @@ export const mkdirTool: Tool = {
     required: ["path"],
   },
   async execute(args) {
-    const rel = String(args.path ?? "").trim();
-    if (!rel || rel === "." || rel === "/") {
-      return 'Error: provide a workspace-relative directory path, e.g. "src/components".';
+    const rel = normalizeWorkspaceRelPath(args.path);
+    if (!rel || rel === ".") {
+      return `Error: provide a workspace-relative directory path, e.g. "src/components". Received: ${describeArgs(args)}`;
     }
     try {
       const abs = resolveInWorkspace(rel);
@@ -53,9 +54,9 @@ export const deleteFileTool: Tool = {
     required: ["path"],
   },
   async execute(args, ctx) {
-    const rel = String(args.path ?? "").trim();
-    if (!rel || rel === "." || rel === "/") {
-      return "Error: refusing to delete the workspace root.";
+    const rel = normalizeWorkspaceRelPath(args.path);
+    if (!rel || rel === ".") {
+      return `Error: refusing to delete — provide a workspace-relative path. Received: ${describeArgs(args)}`;
     }
     const abs = resolveInWorkspace(rel);
     if (abs === path.resolve(getConfig().workspaceRoot)) {
@@ -92,9 +93,9 @@ export const moveFileTool: Tool = {
     required: ["from", "to"],
   },
   async execute(args, ctx) {
-    const from = String(args.from ?? "").trim();
-    const to = String(args.to ?? "").trim();
-    if (!from || !to) return "Error: both from and to paths are required.";
+    const from = normalizeWorkspaceRelPath(args.from);
+    const to = normalizeWorkspaceRelPath(args.to);
+    if (!from || !to) return `Error: both from and to paths are required. Received: ${describeArgs(args)}`;
     const absFrom = resolveInWorkspace(from);
     const absTo = resolveInWorkspace(to);
     if (!(await pathExists(absFrom))) return `Error: source ${from} does not exist.`;

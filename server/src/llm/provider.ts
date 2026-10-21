@@ -30,3 +30,49 @@ export async function listModels(provider: ProviderConfig): Promise<string[]> {
     return provider.models ?? [];
   }
 }
+
+/** Extract the deepest useful cause chain from an OpenAI SDK / fetch error. */
+function causeChain(err: unknown): string[] {
+  const out: string[] = [];
+  let c = (err as { cause?: unknown } | null)?.cause;
+  while (c && out.length < 4) {
+    const e = c as { message?: string; code?: string; cause?: unknown };
+    const label = e.code ? `${e.code}${e.message ? `: ${e.message}` : ""}` : e.message;
+    if (label) out.push(label);
+    c = e?.cause;
+  }
+  return out;
+}
+
+/**
+ * Turn opaque SDK/network errors ("Connection error.") into actionable agent
+ * error messages. Local model servers most often die from OOM/crash mid-
+ * generation or an oversized context — surface that instead of the bare SDK
+ * string.
+ */
+export function describeLlmError(err: unknown, contextTokens?: number): string {
+  const msg = (err as Error)?.message ?? String(err);
+  const causes = causeChain(err);
+  const all = (msg + " " + causes.join(" ")).toLowerCase();
+  const causeSuffix = causes.length ? ` [${causes.join(" | ")}]` : "";
+
+  if (/timed?\s*out|timeout/.test(all)) {
+    return (
+      "Request timed out — the model server accepted the connection but took too long. " +
+      "Long thinking phases or slow hardware on a big model can hit the 10-minute limit; " +
+      "try a smaller task, lower max output tokens, or a faster model." + causeSuffix
+    );
+  }
+  if (/connection error|fetch failed|econnrefused|econnreset|socket hang up|epipe|other side closed|terminated|network/.test(all)) {
+    return (
+      `The model server dropped the connection mid-request${/connection error/i.test(msg) ? "" : ` (${msg})`}. ` +
+      "This usually means the server crashed or restarted while generating — most often out of memory " +
+      "or an oversized context" +
+      (contextTokens
+        ? ` (context was ~${Math.round(contextTokens / 1000)}k tokens — @-mention fewer/smaller files or start a new chat)`
+        : "") +
+      ". Check the model server's logs, then retry." + causeSuffix
+    );
+  }
+  return causes.length ? `${msg} [cause: ${causes.join(" | ")}]` : msg;
+}

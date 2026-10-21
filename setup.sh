@@ -185,9 +185,9 @@ npm_install client || fail "npm install failed in client/"
 # 5. Native modules sanity check (better-sqlite3, node-pty) — rebuild if broken
 # ----------------------------------------------------------------------------
 info "Verifying native modules (better-sqlite3, node-pty)…"
-if ! (cd server && node -e "require('better-sqlite3'); require('node-pty')" >/dev/null 2>&1); then
-  warn "Native modules broken (or Node was upgraded) — rebuilding from source…"
-  (cd server && npm rebuild better-sqlite3 node-pty --build-from-source) \
+if ! (cd server && node -e "require('better-sqlite3'); require('@lydell/node-pty')" >/dev/null 2>&1); then
+  warn "Native modules broken (or Node was upgraded) — rebuilding…"
+  (cd server && npm rebuild better-sqlite3 @lydell/node-pty) \
     || fail "Native module rebuild failed — see error above"
 fi
 ok "Native modules load correctly"
